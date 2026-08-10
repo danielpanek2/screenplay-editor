@@ -348,6 +348,78 @@ function generateScriptReportText(scenes, warnings, title) {
 }
 
 /* ---------------------------------------------------------------
+   Scene units — groups blocks into one chunk per scene (heading +
+   everything until the next heading) for the corkboard/outline view.
+   A unit with headingId === null holds any content before the first
+   scene heading and is always pinned first, non-reorderable.
+--------------------------------------------------------------- */
+function computeSceneUnits(blocks) {
+  const units = [];
+  let current = null;
+  blocks.forEach((b) => {
+    if (b.type === "scene_heading") {
+      if (current) units.push(current);
+      current = { headingId: b.id, heading: b.text.trim() || "(untitled scene)", blocks: [b] };
+    } else {
+      if (!current) current = { headingId: null, heading: "(before first scene)", blocks: [] };
+      current.blocks.push(b);
+    }
+  });
+  if (current) units.push(current);
+  return units;
+}
+
+function getUnitCharacters(unitBlocks) {
+  const set = new Set();
+  unitBlocks.forEach((b) => {
+    if (b.type === "character") {
+      const name = b.text.replace(/\s*\^\s*$/, "").replace(/\s*\([^()]*\)\s*$/, "").trim();
+      if (name) set.add(name);
+    }
+  });
+  return Array.from(set).sort();
+}
+
+/* ---------------------------------------------------------------
+   Dialogue statistics — word/line count per speaking character.
+--------------------------------------------------------------- */
+function computeDialogueStats(blocks) {
+  const stats = {};
+  let currentCharacter = null;
+  blocks.forEach((b) => {
+    if (b.type === "character") {
+      currentCharacter = b.text.replace(/\s*\^\s*$/, "").replace(/\s*\([^()]*\)\s*$/, "").trim();
+      if (currentCharacter && !stats[currentCharacter]) stats[currentCharacter] = { words: 0, lines: 0 };
+    } else if (b.type === "dialogue" && currentCharacter) {
+      const words = b.text.trim() ? b.text.trim().split(/\s+/).length : 0;
+      if (words > 0) {
+        stats[currentCharacter].words += words;
+        stats[currentCharacter].lines += 1;
+      }
+    } else if (b.type !== "parenthetical") {
+      currentCharacter = null;
+    }
+  });
+  const totalWords = Object.values(stats).reduce((s, v) => s + v.words, 0);
+  return Object.entries(stats)
+    .map(([name, v]) => ({ name, ...v, pct: totalWords ? Math.round((v.words / totalWords) * 1000) / 10 : 0 }))
+    .sort((a, b) => b.words - a.words);
+}
+
+function generateDialogueStatsText(stats, title) {
+  const out = [];
+  out.push(`# Dialogue Statistics${title.trim() ? " — " + title.trim() : ""}`);
+  out.push("");
+  const totalWords = stats.reduce((s, v) => s + v.words, 0);
+  out.push(`${stats.length} speaking character${stats.length === 1 ? "" : "s"} · ${totalWords} total dialogue words`);
+  out.push("");
+  stats.forEach((s, i) => {
+    out.push(`${i + 1}. **${s.name}** — ${s.words} words across ${s.lines} line${s.lines === 1 ? "" : "s"} (${s.pct}% of dialogue)`);
+  });
+  return out.join("\n");
+}
+
+/* ---------------------------------------------------------------
    Groups blocks for rendering: pairs a Character marked "dual"
    with the immediately preceding character+dialogue group so they
    can render as two side-by-side columns.
@@ -404,7 +476,7 @@ const PDF_LAYOUT = {
   transition: { left: 0, width: PDF_CONTENT_WIDTH },
 };
 
-function buildScreenplayPdf(blocks, title, author) {
+function buildScreenplayPdf(blocks, title, author, showSceneNumbers) {
   const doc = new jsPDF({ unit: "in", format: "letter" });
   doc.setFont("courier", "normal");
   doc.setFontSize(12);
@@ -421,6 +493,7 @@ function buildScreenplayPdf(blocks, title, author) {
   }
 
   let y = PDF_MARGIN_TOP;
+  let sceneNum = 0;
 
   const ensureRoom = (linesNeeded) => {
     if (y + linesNeeded * PDF_LINE_H > PDF_PAGE_H - PDF_MARGIN_BOTTOM) {
@@ -457,6 +530,15 @@ function buildScreenplayPdf(blocks, title, author) {
     first = false;
 
     if (g.kind === "single") {
+      if (g.block.type === "scene_heading" && g.block.text.trim()) {
+        sceneNum++;
+        ensureRoom(1);
+        if (showSceneNumbers) {
+          doc.setFont("courier", "normal");
+          doc.text(String(sceneNum), PDF_MARGIN_LEFT - 0.45, y);
+          doc.text(String(sceneNum), PDF_MARGIN_LEFT + PDF_CONTENT_WIDTH + 0.3, y);
+        }
+      }
       writeBlock(g.block);
     } else if (g.kind === "cue") {
       writeBlock(g.character);
@@ -491,17 +573,22 @@ export default function ScreenplayEditor() {
   const [elements, setElements] = useState([]);
   const [activeSelection, setActiveSelection] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
-  const [showElementsPanel, setShowElementsPanel] = useState(false);
-  const [showScriptReport, setShowScriptReport] = useState(false);
+  const [showReportsPanel, setShowReportsPanel] = useState(false);
+  const [reportsTab, setReportsTab] = useState("scenes");
   const [suggestIndex, setSuggestIndex] = useState(-1);
   const [loaded, setLoaded] = useState(false);
   const [lastSaved, setLastSaved] = useState(null);
   const [theme, setTheme] = useState(DEFAULT_THEME);
   const [showAppearance, setShowAppearance] = useState(false);
+  const [openMenu, setOpenMenu] = useState(null);
+  const [showSceneNumbers, setShowSceneNumbers] = useState(false);
+  const [outlineMode, setOutlineMode] = useState(false);
   const fileInputRef = useRef(null);
   const elementsFileInputRef = useRef(null);
   const textRefs = useRef({});
   const autosaveTimer = useRef(null);
+  const dragIndexRef = useRef(null);
+  const justDraggedRef = useRef(false);
 
   const resize = (el) => {
     if (!el) return;
@@ -530,6 +617,27 @@ export default function ScreenplayEditor() {
       // ignore
     }
   }, [theme]);
+
+  // Load/persist small display preferences (scene numbers etc).
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PREFS_STORAGE_KEY);
+      if (raw) {
+        const prefs = JSON.parse(raw);
+        if (typeof prefs.showSceneNumbers === "boolean") setShowSceneNumbers(prefs.showSceneNumbers);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify({ showSceneNumbers }));
+    } catch (e) {
+      // ignore
+    }
+  }, [showSceneNumbers]);
 
   // Load any autosaved script on first mount.
   useEffect(() => {
@@ -644,6 +752,22 @@ export default function ScreenplayEditor() {
     return findNameWarnings(allNames);
   }, [knownCharacterNames, elements]);
 
+  const sceneNumberMap = useMemo(() => {
+    const map = {};
+    let n = 0;
+    blocks.forEach((b) => {
+      if (b.type === "scene_heading") {
+        n++;
+        map[b.id] = n;
+      }
+    });
+    return map;
+  }, [blocks]);
+
+  const sceneUnits = useMemo(() => computeSceneUnits(blocks), [blocks]);
+
+  const dialogueStats = useMemo(() => computeDialogueStats(blocks), [blocks]);
+
   const getSuggestionsFor = (block) => {
     if (!block) return [];
     if (block.type === "character") {
@@ -671,6 +795,57 @@ export default function ScreenplayEditor() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const handleExportDialogueStats = () => {
+    const text = generateDialogueStatsText(dialogueStats, title);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    a.href = url;
+    a.download = `${safe}_dialogue.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCardDragStart = (e, idx) => {
+    dragIndexRef.current = idx;
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleCardDragOver = (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const handleCardDrop = (e, idx) => {
+    e.preventDefault();
+    const from = dragIndexRef.current;
+    dragIndexRef.current = null;
+    if (from === null || from === idx) return;
+    setBlocks((prevBlocks) => {
+      const units = computeSceneUnits(prevBlocks);
+      const leading = units[0] && units[0].headingId === null ? units[0] : null;
+      const reorderable = leading ? units.slice(1) : units;
+      const arr = [...reorderable];
+      const [moved] = arr.splice(from, 1);
+      arr.splice(idx, 0, moved);
+      const newUnits = leading ? [leading, ...arr] : arr;
+      return newUnits.flatMap((u) => u.blocks);
+    });
+    justDraggedRef.current = true;
+    setTimeout(() => {
+      justDraggedRef.current = false;
+    }, 0);
+  };
+
+  const handleCardClick = (headingId) => {
+    if (justDraggedRef.current || !headingId) return;
+    setOutlineMode(false);
+    setPendingFocus({ id: headingId, pos: "start" });
   };
 
   const markElement = (blockId, start, end, category) => {
@@ -822,7 +997,7 @@ export default function ScreenplayEditor() {
   };
 
   const handleExportPDF = () => {
-    const doc = buildScreenplayPdf(blocks, title, author);
+    const doc = buildScreenplayPdf(blocks, title, author, showSceneNumbers);
     const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
     doc.save(`${safe}.pdf`);
   };
@@ -876,8 +1051,15 @@ export default function ScreenplayEditor() {
     const isFocused = b.id === focusedId;
     const suggestions = isFocused ? getSuggestionsFor(b) : [];
     const typeStyle = dualMode ? { width: "100%", marginLeft: "0" } : TYPE_STYLE[b.type];
+    const sceneNum = !dualMode && b.type === "scene_heading" ? sceneNumberMap[b.id] : null;
     return (
       <div key={b.id} style={{ position: "relative" }}>
+        {showSceneNumbers && sceneNum && (
+          <>
+            <span style={{ ...styles.sceneNumberBadge, left: "-0.55in" }}>{sceneNum}</span>
+            <span style={{ ...styles.sceneNumberBadge, right: "-0.65in" }}>{sceneNum}</span>
+          </>
+        )}
         <textarea
           ref={(el) => (textRefs.current[b.id] = el)}
           value={b.text}
@@ -903,7 +1085,7 @@ export default function ScreenplayEditor() {
           }}
         />
         {suggestions.length > 0 && (
-          <div style={{ ...styles.suggestDropdown, marginLeft: typeStyle.marginLeft, width: typeStyle.width }}>
+          <div style={{ ...styles.suggestDropdown, marginLeft: typeStyle.marginLeft, minWidth: "1.6in", maxWidth: "3in", width: "max-content" }}>
             {suggestions.map((s, i) => (
               <div
                 key={s + i}
@@ -923,6 +1105,38 @@ export default function ScreenplayEditor() {
       </div>
     );
   };
+
+  const renderMenu = (key, label, items) => (
+    <div style={{ position: "relative" }}>
+      <button style={styles.btn} onClick={() => setOpenMenu(openMenu === key ? null : key)}>
+        {label} ▾
+      </button>
+      {openMenu === key && (
+        <>
+          <div style={styles.menuOverlay} className="no-print" onClick={() => setOpenMenu(null)} />
+          <div style={styles.dropdownMenu} className="no-print">
+            {items.map((it, i) =>
+              it.divider ? (
+                <div key={i} style={styles.menuDivider} />
+              ) : (
+                <button
+                  key={i}
+                  style={styles.dropdownItem}
+                  onClick={() => {
+                    it.onClick();
+                    setOpenMenu(null);
+                  }}
+                >
+                  {it.checkbox !== undefined && <span style={styles.checkbox}>{it.checkbox ? "✓" : ""}</span>}
+                  {it.label}
+                </button>
+              )
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
 
   return (
     <div style={styles.app}>
@@ -951,22 +1165,35 @@ export default function ScreenplayEditor() {
         </div>
 
         <div style={styles.headerActions}>
-          <button style={styles.btn} onClick={handleNew}>New</button>
-          <button style={styles.btn} onClick={handleLoadClick}>Load</button>
+          {renderMenu("file", "File", [
+            { label: "New", onClick: handleNew },
+            { label: "Load Script…", onClick: handleLoadClick },
+            { divider: true },
+            { label: "Save .fountain", onClick: handleSave },
+            { label: "Export PDF", onClick: handleExportPDF },
+            { divider: true },
+            { label: "Print", onClick: () => window.print() },
+          ])}
+          {renderMenu("view", "View", [
+            { label: "Appearance / Theme…", onClick: () => setShowAppearance(true) },
+            { divider: true },
+            { label: "Scene Numbers", checkbox: showSceneNumbers, onClick: () => setShowSceneNumbers((v) => !v) },
+            { label: outlineMode ? "Script View" : "Outline View", onClick: () => setOutlineMode((v) => !v) },
+            { label: railCollapsed ? "Expand Left Panel" : "Collapse Left Panel", onClick: () => setRailCollapsed((v) => !v) },
+          ])}
+          {renderMenu("reports", "Reports", [
+            { label: "Scene Report", onClick: () => { setReportsTab("scenes"); setShowReportsPanel(true); } },
+            { label: "Elements", onClick: () => { setReportsTab("elements"); setShowReportsPanel(true); } },
+            { label: "Dialogue Statistics", onClick: () => { setReportsTab("dialogue"); setShowReportsPanel(true); } },
+          ])}
           <input ref={fileInputRef} type="file" accept=".fountain,.txt" style={{ display: "none" }} onChange={handleFile} />
-          <button style={styles.btn} onClick={() => window.print()}>Print</button>
-          <button style={styles.btn} onClick={() => setShowElementsPanel(true)}>
-            Elements{elements.length > 0 ? ` (${elements.length})` : ""}
-          </button>
-          <button style={styles.btn} onClick={() => setShowScriptReport(true)}>Report</button>
-          <button style={styles.btn} onClick={() => setShowAppearance(true)} title="Appearance">⚙ Theme</button>
-          <button style={styles.btn} onClick={handleExportPDF}>PDF</button>
-          <button style={styles.btnPrimary} onClick={handleSave}>Save .fountain</button>
+          <button style={styles.btnPrimary} onClick={handleSave}>Save</button>
         </div>
       </div>
 
       <div style={styles.body}>
         {/* Left rail */}
+        {!outlineMode && (
         <div style={{ ...styles.rail, ...(railCollapsed ? styles.railCollapsed : {}) }} className="no-print">
           <button
             style={styles.railToggle}
@@ -1053,8 +1280,47 @@ export default function ScreenplayEditor() {
             </div>
           )}
         </div>
+        )}
 
-        {/* Page */}
+        {outlineMode ? (
+          /* Corkboard / outline view */
+          <div style={styles.corkboardWrap} className="no-print">
+            <div style={styles.corkboard}>
+              {sceneUnits.map((u, i) => {
+                if (u.headingId === null) {
+                  if (u.blocks.length === 0) return null;
+                  return (
+                    <div key="leading" style={{ ...styles.card, ...styles.cardPinned }}>
+                      <div style={styles.cardHeading}>Before first scene</div>
+                    </div>
+                  );
+                }
+                const reorderIdx = u.headingId === null ? -1 : sceneUnits.filter((x) => x.headingId !== null).findIndex((x) => x.headingId === u.headingId);
+                const chars = getUnitCharacters(u.blocks);
+                const preview = u.blocks.find((b) => b.type === "action" && b.text.trim())?.text.trim().slice(0, 90) || "";
+                return (
+                  <div
+                    key={u.headingId}
+                    draggable
+                    onDragStart={(e) => handleCardDragStart(e, reorderIdx)}
+                    onDragOver={handleCardDragOver}
+                    onDrop={(e) => handleCardDrop(e, reorderIdx)}
+                    onClick={() => handleCardClick(u.headingId)}
+                    style={styles.card}
+                  >
+                    {showSceneNumbers && sceneNumberMap[u.headingId] && (
+                      <div style={styles.cardNumber}>{sceneNumberMap[u.headingId]}</div>
+                    )}
+                    <div style={styles.cardHeading}>{u.heading}</div>
+                    {preview && <div style={styles.cardPreview}>{preview}</div>}
+                    <div style={styles.cardChars}>{chars.length ? chars.join(", ") : "No characters"}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+        /* Page */
         <div style={styles.pageWrap}>
           <div style={styles.page} className="print-page">
             {buildPageGroups(blocks).map((g) => {
@@ -1082,13 +1348,20 @@ export default function ScreenplayEditor() {
             })}
           </div>
         </div>
+        )}
       </div>
 
       {/* Status bar */}
       <div style={styles.statusBar} className="no-print">
-        <span style={styles.statusPill}>{LABELS[focusedType]}</span>
+        {outlineMode ? (
+          <span style={styles.statusPill}>Outline</span>
+        ) : (
+          <span style={styles.statusPill}>{LABELS[focusedType]}</span>
+        )}
         <span style={styles.statusText}>
-          {wordCount} words · ~{pageEstimate} page{pageEstimate === 1 ? "" : "s"}
+          {outlineMode
+            ? `${sceneUnits.filter((u) => u.headingId !== null).length} scenes · drag cards to reorder`
+            : `${wordCount} words · ~${pageEstimate} page${pageEstimate === 1 ? "" : "s"}`}
           {lastSaved ? ` · Saved ${new Date(lastSaved).toLocaleTimeString()}` : ""}
         </span>
       </div>
@@ -1111,79 +1384,119 @@ export default function ScreenplayEditor() {
         </>
       )}
 
-      {/* Elements panel */}
-      {showElementsPanel && (
+      {/* Reports panel — Scenes / Elements / Dialogue */}
+      {showReportsPanel && (
         <>
-          <div style={styles.overlay} className="no-print" onClick={() => setShowElementsPanel(false)} />
+          <div style={styles.overlay} className="no-print" onClick={() => setShowReportsPanel(false)} />
           <div style={styles.panel} className="no-print">
             <div style={styles.panelHeader}>
-              <span style={styles.brandText}>ELEMENTS</span>
-              <button style={styles.btn} onClick={() => setShowElementsPanel(false)}>Close</button>
+              <span style={styles.brandText}>REPORTS</span>
+              <button style={styles.btn} onClick={() => setShowReportsPanel(false)}>Close</button>
             </div>
-            <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "8px" }} onClick={handleExportElements}>
-              Export Report
-            </button>
-            <button style={{ ...styles.btn, width: "100%", marginBottom: "16px" }} onClick={handleLoadElementsClick}>
-              Load Report
-            </button>
-            <input
-              ref={elementsFileInputRef}
-              type="file"
-              accept=".md,.txt"
-              style={{ display: "none" }}
-              onChange={handleElementsFile}
-            />
-            {elements.length === 0 && <div style={{ color: mutedColor, fontSize: "13px" }}>Nothing marked yet. Select text in an Action line to tag a character, prop, or sound cue.</div>}
-            {Object.entries(CATEGORIES).map(([cat, label]) => {
-              const items = elements.filter((e) => e.category === cat);
-              if (items.length === 0) return null;
-              return (
-                <div key={cat} style={{ marginBottom: "18px" }}>
-                  <div style={styles.railLabel}>{label}</div>
-                  {items.map((it) => (
-                    <div key={it.id} style={styles.elementRow}>
-                      <span>{it.text}</span>
-                      <button style={styles.elementRemove} onClick={() => removeElement(it.id)}>×</button>
-                    </div>
-                  ))}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
 
-      {/* Script Report panel */}
-      {showScriptReport && (
-        <>
-          <div style={styles.overlay} className="no-print" onClick={() => setShowScriptReport(false)} />
-          <div style={styles.panel} className="no-print">
-            <div style={styles.panelHeader}>
-              <span style={styles.brandText}>SCRIPT REPORT</span>
-              <button style={styles.btn} onClick={() => setShowScriptReport(false)}>Close</button>
+            <div style={styles.tabRow}>
+              <button
+                style={{ ...styles.tabBtn, ...(reportsTab === "scenes" ? styles.tabBtnActive : {}) }}
+                onClick={() => setReportsTab("scenes")}
+              >
+                Scenes
+              </button>
+              <button
+                style={{ ...styles.tabBtn, ...(reportsTab === "elements" ? styles.tabBtnActive : {}) }}
+                onClick={() => setReportsTab("elements")}
+              >
+                Elements{elements.length > 0 ? ` (${elements.length})` : ""}
+              </button>
+              <button
+                style={{ ...styles.tabBtn, ...(reportsTab === "dialogue" ? styles.tabBtnActive : {}) }}
+                onClick={() => setReportsTab("dialogue")}
+              >
+                Dialogue
+              </button>
             </div>
-            <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportScriptReport}>
-              Export Report
-            </button>
-            <div style={{ fontSize: "12px", color: mutedColor, marginBottom: "14px" }}>
-              {scenes.length} scene{scenes.length === 1 ? "" : "s"} · {new Set(scenes.flatMap((s) => s.characters)).size} character
-              {new Set(scenes.flatMap((s) => s.characters)).size === 1 ? "" : "s"}
-            </div>
-            {scenes.map((s, i) => (
-              <div key={i} style={styles.sceneCard}>
-                <div style={{ fontWeight: 700, fontSize: "12.5px" }}>{i + 1}. {s.heading}</div>
-                <div style={{ fontSize: "11.5px", color: mutedColor, marginTop: "4px" }}>
-                  {s.characters.length ? s.characters.join(", ") : "No characters"} · ~{s.pages}p
+
+            {reportsTab === "scenes" && (
+              <>
+                <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportScriptReport}>
+                  Export Report
+                </button>
+                <div style={{ fontSize: "12px", color: mutedColor, marginBottom: "14px" }}>
+                  {scenes.length} scene{scenes.length === 1 ? "" : "s"} · {new Set(scenes.flatMap((s) => s.characters)).size} character
+                  {new Set(scenes.flatMap((s) => s.characters)).size === 1 ? "" : "s"}
                 </div>
-              </div>
-            ))}
-            {nameWarnings.length > 0 && (
-              <div style={{ marginTop: "18px" }}>
-                <div style={styles.railLabel}>Possible Name Inconsistencies</div>
-                {nameWarnings.map(([a, b], i) => (
-                  <div key={i} style={styles.warningRow}>"{a}" vs "{b}"</div>
+                {scenes.map((s, i) => (
+                  <div key={i} style={styles.sceneCard}>
+                    <div style={{ fontWeight: 700, fontSize: "12.5px" }}>{i + 1}. {s.heading}</div>
+                    <div style={{ fontSize: "11.5px", color: mutedColor, marginTop: "4px" }}>
+                      {s.characters.length ? s.characters.join(", ") : "No characters"} · ~{s.pages}p
+                    </div>
+                  </div>
                 ))}
-              </div>
+                {nameWarnings.length > 0 && (
+                  <div style={{ marginTop: "18px" }}>
+                    <div style={styles.railLabel}>Possible Name Inconsistencies</div>
+                    {nameWarnings.map(([a, b], i) => (
+                      <div key={i} style={styles.warningRow}>"{a}" vs "{b}"</div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+
+            {reportsTab === "elements" && (
+              <>
+                <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "8px" }} onClick={handleExportElements}>
+                  Export Report
+                </button>
+                <button style={{ ...styles.btn, width: "100%", marginBottom: "16px" }} onClick={handleLoadElementsClick}>
+                  Load Report
+                </button>
+                <input
+                  ref={elementsFileInputRef}
+                  type="file"
+                  accept=".md,.txt"
+                  style={{ display: "none" }}
+                  onChange={handleElementsFile}
+                />
+                {elements.length === 0 && <div style={{ color: mutedColor, fontSize: "13px" }}>Nothing marked yet. Select text in an Action line to tag a character, prop, or sound cue.</div>}
+                {Object.entries(CATEGORIES).map(([cat, label]) => {
+                  const items = elements.filter((e) => e.category === cat);
+                  if (items.length === 0) return null;
+                  return (
+                    <div key={cat} style={{ marginBottom: "18px" }}>
+                      <div style={styles.railLabel}>{label}</div>
+                      {items.map((it) => (
+                        <div key={it.id} style={styles.elementRow}>
+                          <span>{it.text}</span>
+                          <button style={styles.elementRemove} onClick={() => removeElement(it.id)}>×</button>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </>
+            )}
+
+            {reportsTab === "dialogue" && (
+              <>
+                <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportDialogueStats}>
+                  Export Report
+                </button>
+                {dialogueStats.length === 0 && (
+                  <div style={{ color: mutedColor, fontSize: "13px" }}>No dialogue yet.</div>
+                )}
+                {dialogueStats.map((s) => (
+                  <div key={s.name} style={styles.statRow}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px" }}>
+                      <span>{s.name}</span>
+                      <span style={{ color: mutedColor }}>{s.words}w · {s.pct}%</span>
+                    </div>
+                    <div style={styles.statBarTrack}>
+                      <div style={{ ...styles.statBarFill, width: `${s.pct}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </>
             )}
           </div>
         </>
@@ -1292,6 +1605,7 @@ const THEMES = [
 
 const DEFAULT_THEME = THEMES[0];
 const THEME_STORAGE_KEY = "slugline_theme_v1";
+const PREFS_STORAGE_KEY = "slugline_prefs_v1";
 
 function buildStyles(t) {
   const mute = mix(t.ink, t.text, 0.55);
@@ -1419,9 +1733,9 @@ function buildStyles(t) {
       outline: "none",
       resize: "none",
       overflow: "hidden",
-      fontFamily: "'Courier New', Courier, monospace",
+      fontFamily: "'Courier Prime', 'Courier New', Courier, monospace",
       fontSize: "12pt",
-      lineHeight: 1.5,
+      lineHeight: 1,
       color: "#1a1a1a",
       padding: 0,
       margin: 0,
@@ -1521,9 +1835,10 @@ function buildStyles(t) {
     suggestItem: {
       padding: "6px 10px",
       fontSize: "11.5px",
-      fontFamily: "'Courier New', Courier, monospace",
+      fontFamily: "'Courier Prime', 'Courier New', Courier, monospace",
       color: t.text,
       cursor: "pointer",
+      whiteSpace: "nowrap",
     },
     suggestItemActive: { background: t.gold, color: t.ink },
     sceneCard: {
@@ -1552,12 +1867,106 @@ function buildStyles(t) {
       fontSize: "12.5px",
       padding: "4px 0",
     },
+    menuOverlay: {
+      position: "fixed",
+      inset: 0,
+      background: "transparent",
+      zIndex: 55,
+    },
+    dropdownMenu: {
+      position: "absolute",
+      top: "100%",
+      left: 0,
+      marginTop: "4px",
+      background: t.ink,
+      border: `1px solid ${line}`,
+      borderRadius: "4px",
+      minWidth: "210px",
+      zIndex: 60,
+      boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
+      padding: "4px",
+      display: "flex",
+      flexDirection: "column",
+    },
+    dropdownItem: {
+      background: "transparent",
+      border: "none",
+      color: t.text,
+      textAlign: "left",
+      padding: "8px 10px",
+      fontSize: "12.5px",
+      cursor: "pointer",
+      borderRadius: "3px",
+      display: "flex",
+      alignItems: "center",
+      gap: "8px",
+      width: "100%",
+    },
+    menuDivider: { height: "1px", background: line, margin: "4px 2px" },
+    checkbox: { width: "14px", display: "inline-block", color: t.gold, fontWeight: 700 },
+    tabRow: {
+      display: "flex",
+      gap: "6px",
+      marginBottom: "16px",
+      borderBottom: `1px solid ${line}`,
+      paddingBottom: "8px",
+    },
+    tabBtn: {
+      background: "transparent",
+      border: "none",
+      color: mute,
+      fontSize: "11px",
+      letterSpacing: "1px",
+      padding: "6px 8px",
+      cursor: "pointer",
+      borderRadius: "3px",
+      textTransform: "uppercase",
+    },
+    tabBtnActive: { color: t.gold, background: `${t.gold}1a`, fontWeight: 700 },
+    corkboardWrap: { flex: 1, overflowY: "auto", padding: "28px" },
+    corkboard: { display: "flex", flexWrap: "wrap", gap: "16px", alignContent: "flex-start" },
+    card: {
+      width: "220px",
+      minHeight: "130px",
+      background: t.paper,
+      color: "#1a1a1a",
+      borderRadius: "3px",
+      padding: "12px",
+      boxShadow: "0 4px 14px rgba(0,0,0,0.35)",
+      cursor: "grab",
+      fontFamily: "'Courier Prime', 'Courier New', Courier, monospace",
+      position: "relative",
+    },
+    cardPinned: { cursor: "default", opacity: 0.7 },
+    cardNumber: {
+      position: "absolute",
+      top: "8px",
+      right: "10px",
+      fontSize: "10px",
+      color: "#8a8578",
+      fontWeight: 700,
+    },
+    cardHeading: { fontWeight: 700, fontSize: "11.5px", marginBottom: "8px", paddingRight: "18px" },
+    cardPreview: { fontSize: "10.5px", color: "#4a4a4a", marginBottom: "8px", lineHeight: 1.4 },
+    cardChars: { fontSize: "10px", color: "#8a8578", marginTop: "auto" },
+    statRow: { marginBottom: "12px" },
+    statBarTrack: { height: "6px", background: line, borderRadius: "3px", marginTop: "4px", overflow: "hidden" },
+    statBarFill: { height: "100%", background: t.gold },
+    sceneNumberBadge: {
+      position: "absolute",
+      top: 0,
+      fontFamily: "'Courier Prime', 'Courier New', Courier, monospace",
+      fontSize: "12pt",
+      lineHeight: 1,
+      color: "#1a1a1a",
+    },
   };
 }
 
 function buildGlobalCss(t) {
   const line = mix(t.ink, t.text, 0.14);
   return `
+  @import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&display=swap');
   * { box-sizing: border-box; }
   textarea::placeholder { color: #b9b3a0; }
   textarea:focus { background: rgba(0,0,0,0.03); }
