@@ -398,6 +398,8 @@ export default function ScreenplayEditor() {
   const [suggestIndex, setSuggestIndex] = useState(-1);
   const [loaded, setLoaded] = useState(false);
   const [lastSaved, setLastSaved] = useState(null);
+  const [theme, setTheme] = useState(DEFAULT_THEME);
+  const [showAppearance, setShowAppearance] = useState(false);
   const fileInputRef = useRef(null);
   const elementsFileInputRef = useRef(null);
   const textRefs = useRef({});
@@ -412,6 +414,24 @@ export default function ScreenplayEditor() {
   useEffect(() => {
     Object.values(textRefs.current).forEach(resize);
   }, [blocks]);
+
+  // Load/persist the appearance theme (separate from script content).
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(THEME_STORAGE_KEY);
+      if (raw) setTheme(JSON.parse(raw));
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(theme));
+    } catch (e) {
+      // ignore
+    }
+  }, [theme]);
 
   // Load any autosaved script on first mount.
   useEffect(() => {
@@ -744,6 +764,10 @@ export default function ScreenplayEditor() {
 
   const focusedType = blocks.find((b) => b.id === focusedId)?.type || "action";
 
+  const styles = useMemo(() => buildStyles(theme), [theme]);
+  const globalCss = useMemo(() => buildGlobalCss(theme), [theme]);
+  const mutedColor = useMemo(() => mix(theme.ink, theme.text, 0.55), [theme]);
+
   const renderField = (b, dualMode = false) => {
     const isFocused = b.id === focusedId;
     const suggestions = isFocused ? getSuggestionsFor(b) : [];
@@ -798,7 +822,7 @@ export default function ScreenplayEditor() {
 
   return (
     <div style={styles.app}>
-      <style>{GLOBAL_CSS}</style>
+      <style>{globalCss}</style>
 
       {/* Header */}
       <div style={styles.header} className="no-print">
@@ -831,6 +855,7 @@ export default function ScreenplayEditor() {
             Elements{elements.length > 0 ? ` (${elements.length})` : ""}
           </button>
           <button style={styles.btn} onClick={() => setShowScriptReport(true)}>Report</button>
+          <button style={styles.btn} onClick={() => setShowAppearance(true)} title="Appearance">⚙ Theme</button>
           <button style={styles.btnPrimary} onClick={handleSave}>Save .fountain</button>
         </div>
       </div>
@@ -1003,7 +1028,7 @@ export default function ScreenplayEditor() {
               style={{ display: "none" }}
               onChange={handleElementsFile}
             />
-            {elements.length === 0 && <div style={{ color: MUTE, fontSize: "13px" }}>Nothing marked yet. Select text in an Action line to tag a character, prop, or sound cue.</div>}
+            {elements.length === 0 && <div style={{ color: mutedColor, fontSize: "13px" }}>Nothing marked yet. Select text in an Action line to tag a character, prop, or sound cue.</div>}
             {Object.entries(CATEGORIES).map(([cat, label]) => {
               const items = elements.filter((e) => e.category === cat);
               if (items.length === 0) return null;
@@ -1035,14 +1060,14 @@ export default function ScreenplayEditor() {
             <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportScriptReport}>
               Export Report
             </button>
-            <div style={{ fontSize: "12px", color: MUTE, marginBottom: "14px" }}>
+            <div style={{ fontSize: "12px", color: mutedColor, marginBottom: "14px" }}>
               {scenes.length} scene{scenes.length === 1 ? "" : "s"} · {new Set(scenes.flatMap((s) => s.characters)).size} character
               {new Set(scenes.flatMap((s) => s.characters)).size === 1 ? "" : "s"}
             </div>
             {scenes.map((s, i) => (
               <div key={i} style={styles.sceneCard}>
                 <div style={{ fontWeight: 700, fontSize: "12.5px" }}>{i + 1}. {s.heading}</div>
-                <div style={{ fontSize: "11.5px", color: MUTE, marginTop: "4px" }}>
+                <div style={{ fontSize: "11.5px", color: mutedColor, marginTop: "4px" }}>
                   {s.characters.length ? s.characters.join(", ") : "No characters"} · ~{s.pages}p
                 </div>
               </div>
@@ -1058,273 +1083,382 @@ export default function ScreenplayEditor() {
           </div>
         </>
       )}
+
+      {/* Appearance panel */}
+      {showAppearance && (
+        <>
+          <div style={styles.overlay} className="no-print" onClick={() => setShowAppearance(false)} />
+          <div style={styles.panel} className="no-print">
+            <div style={styles.panelHeader}>
+              <span style={styles.brandText}>APPEARANCE</span>
+              <button style={styles.btn} onClick={() => setShowAppearance(false)}>Close</button>
+            </div>
+
+            <div style={styles.railLabel}>Presets</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "20px" }}>
+              {THEMES.map((p) => {
+                const active = theme.ink === p.ink && theme.gold === p.gold && theme.paper === p.paper;
+                return (
+                  <button
+                    key={p.id}
+                    title={p.name}
+                    onClick={() => setTheme({ ink: p.ink, paper: p.paper, text: p.text, gold: p.gold })}
+                    style={{
+                      ...styles.swatch,
+                      border: active ? `2px solid ${theme.gold}` : "2px solid transparent",
+                      background: `linear-gradient(135deg, ${p.ink} 50%, ${p.gold} 50%)`,
+                    }}
+                  />
+                );
+              })}
+            </div>
+
+            <div style={styles.railLabel}>Custom</div>
+            <label style={styles.colorRow}>
+              <span>Background</span>
+              <input
+                type="color"
+                value={theme.ink}
+                onChange={(e) => {
+                  const hex = e.target.value;
+                  setTheme((t) => ({ ...t, ink: hex, text: autoText(hex) }));
+                }}
+              />
+            </label>
+            <label style={styles.colorRow}>
+              <span>Accent</span>
+              <input type="color" value={theme.gold} onChange={(e) => setTheme((t) => ({ ...t, gold: e.target.value }))} />
+            </label>
+            <label style={styles.colorRow}>
+              <span>Page</span>
+              <input type="color" value={theme.paper} onChange={(e) => setTheme((t) => ({ ...t, paper: e.target.value }))} />
+            </label>
+
+            <button style={{ ...styles.btn, width: "100%", marginTop: "18px" }} onClick={() => setTheme(DEFAULT_THEME)}>
+              Reset to Default
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
 /* ---------------------------------------------------------------
-   Styles
+   Themes — small color helpers + presets. Each theme supplies an
+   "ink" (app background), "paper" (page background), "text" (chrome
+   text color), and "gold" (accent). "mute"/"line" are derived from
+   ink+text so any custom combination stays readable.
 --------------------------------------------------------------- */
-const INK = "#1b1a17";
-const PAPER = "#fbf9f4";
-const GOLD = "#c9a24c";
-const MUTE = "#948e7d";
-const LINE = "#3a372f";
+function hexToRgb(hex) {
+  let h = hex.replace("#", "");
+  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  const num = parseInt(h, 16);
+  return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+}
+function rgbToHex([r, g, b]) {
+  return "#" + [r, g, b].map((v) => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2, "0")).join("");
+}
+function mix(hex1, hex2, weight) {
+  const c1 = hexToRgb(hex1), c2 = hexToRgb(hex2);
+  return rgbToHex(c1.map((v, i) => v + (c2[i] - v) * weight));
+}
+function luminance(hex) {
+  const [r, g, b] = hexToRgb(hex);
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+function autoText(inkHex) {
+  return luminance(inkHex) > 0.5 ? "#241f18" : "#fbf9f4";
+}
 
-const styles = {
-  app: {
-    display: "flex",
-    flexDirection: "column",
-    height: "100vh",
-    background: INK,
-    color: PAPER,
-    fontFamily: "'Helvetica Neue', Arial, sans-serif",
-  },
-  header: {
-    display: "flex",
-    alignItems: "center",
-    gap: "16px",
-    padding: "10px 18px",
-    borderBottom: `1px solid ${LINE}`,
-    flexWrap: "wrap",
-  },
-  brand: { display: "flex", alignItems: "center", gap: "8px", minWidth: "120px" },
-  brandMark: { color: GOLD, fontSize: "18px" },
-  brandText: { fontSize: "13px", letterSpacing: "3px", fontWeight: 700, color: GOLD },
-  titleFields: { display: "flex", gap: "8px", flex: 1, minWidth: "240px" },
-  titleInput: {
-    background: "transparent",
-    border: "none",
-    borderBottom: `1px solid ${LINE}`,
-    color: PAPER,
-    fontSize: "14px",
-    padding: "4px 2px",
-    flex: 2,
-    minWidth: "120px",
-    outline: "none",
-  },
-  authorInput: {
-    background: "transparent",
-    border: "none",
-    borderBottom: `1px solid ${LINE}`,
-    color: MUTE,
-    fontSize: "13px",
-    padding: "4px 2px",
-    flex: 1,
-    minWidth: "100px",
-    outline: "none",
-  },
-  headerActions: { display: "flex", gap: "8px" },
-  btn: {
-    background: "transparent",
-    color: PAPER,
-    border: `1px solid ${LINE}`,
-    borderRadius: "3px",
-    padding: "7px 12px",
-    fontSize: "12px",
-    cursor: "pointer",
-    letterSpacing: "0.5px",
-  },
-  btnPrimary: {
-    background: GOLD,
-    color: INK,
-    border: `1px solid ${GOLD}`,
-    borderRadius: "3px",
-    padding: "7px 14px",
-    fontSize: "12px",
-    fontWeight: 700,
-    cursor: "pointer",
-    letterSpacing: "0.5px",
-  },
-  body: { flex: 1, display: "flex", overflow: "hidden" },
-  rail: {
-    width: "168px",
-    borderRight: `1px solid ${LINE}`,
-    padding: "16px 10px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "6px",
-    overflowY: "auto",
-    overflowX: "hidden",
-    flexShrink: 0,
-    transition: "width 0.15s ease",
-  },
-  railCollapsed: { width: "48px", padding: "16px 6px", alignItems: "center" },
-  railToggle: {
-    background: "transparent",
-    border: `1px solid ${LINE}`,
-    color: MUTE,
-    borderRadius: "3px",
-    padding: "6px 8px",
-    fontSize: "11px",
-    cursor: "pointer",
-    marginBottom: "8px",
-    width: "100%",
-  },
-  railLabel: { fontSize: "10px", letterSpacing: "2px", color: MUTE, marginBottom: "4px", paddingLeft: "4px" },
-  railBtn: {
-    background: "transparent",
-    border: `1px solid ${LINE}`,
-    color: PAPER,
-    borderRadius: "3px",
-    padding: "8px 10px",
-    fontSize: "12px",
-    textAlign: "left",
-    cursor: "pointer",
-    width: "100%",
-  },
-  railBtnCollapsed: { textAlign: "center", padding: "8px 0", fontWeight: 700 },
-  railBtnActive: { background: GOLD, color: INK, border: `1px solid ${GOLD}`, fontWeight: 700 },
-  railHint: { marginTop: "18px", fontSize: "10.5px", color: MUTE, lineHeight: 1.8, paddingLeft: "4px" },
-  pageWrap: { flex: 1, overflowY: "auto", padding: "32px 24px", display: "flex", justifyContent: "center" },
-  page: {
-    background: PAPER,
-    color: "#1a1a1a",
-    width: "8.5in",
-    minHeight: "11in",
-    padding: "1in 1in 1in 1.5in",
-    boxShadow: "0 8px 30px rgba(0,0,0,0.5)",
-    flexShrink: 0,
-  },
-  line: {
-    display: "block",
-    width: "100%",
-    background: "transparent",
-    border: "none",
-    outline: "none",
-    resize: "none",
-    overflow: "hidden",
-    fontFamily: "'Courier New', Courier, monospace",
-    fontSize: "12pt",
-    lineHeight: 1.5,
-    color: "#1a1a1a",
-    padding: 0,
-    margin: 0,
-  },
-  statusBar: {
-    display: "flex",
-    justifyContent: "space-between",
-    padding: "6px 18px",
-    borderTop: `1px solid ${LINE}`,
-    fontSize: "11.5px",
-    color: MUTE,
-  },
-  statusPill: {
-    background: "rgba(201,162,76,0.15)",
-    color: GOLD,
-    border: `1px solid ${GOLD}`,
-    borderRadius: "3px",
-    padding: "2px 8px",
-    fontWeight: 700,
-    letterSpacing: "0.5px",
-    fontSize: "10.5px",
-  },
-  statusText: {},
-  overlay: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(0,0,0,0.35)",
-    zIndex: 40,
-  },
-  contextMenu: {
-    position: "fixed",
-    zIndex: 50,
-    background: INK,
-    border: `1px solid ${GOLD}`,
-    borderRadius: "4px",
-    padding: "6px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "2px",
-    boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
-    minWidth: "160px",
-  },
-  contextMenuBtn: {
-    background: "transparent",
-    border: "none",
-    color: PAPER,
-    textAlign: "left",
-    padding: "8px 10px",
-    fontSize: "12.5px",
-    cursor: "pointer",
-    borderRadius: "3px",
-  },
-  panel: {
-    position: "fixed",
-    top: 0,
-    right: 0,
-    bottom: 0,
-    width: "320px",
-    maxWidth: "90vw",
-    background: INK,
-    borderLeft: `1px solid ${LINE}`,
-    padding: "18px",
-    overflowY: "auto",
-    zIndex: 50,
-    boxShadow: "-8px 0 30px rgba(0,0,0,0.5)",
-  },
-  panelHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" },
-  elementRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "6px 8px",
-    fontSize: "12.5px",
-    borderBottom: `1px solid ${LINE}`,
-  },
-  elementRemove: {
-    background: "transparent",
-    border: "none",
-    color: MUTE,
-    cursor: "pointer",
-    fontSize: "15px",
-    lineHeight: 1,
-    padding: "0 4px",
-  },
-  dualRow: { display: "flex", gap: "0.3in", width: "100%" },
-  dualCol: { flex: 1, minWidth: 0 },
-  suggestDropdown: {
-    position: "absolute",
-    zIndex: 30,
-    background: INK,
-    border: `1px solid ${GOLD}`,
-    borderRadius: "3px",
-    marginTop: "2px",
-    overflow: "hidden",
-    boxShadow: "0 6px 16px rgba(0,0,0,0.4)",
-  },
-  suggestItem: {
-    padding: "6px 10px",
-    fontSize: "11.5px",
-    fontFamily: "'Courier New', Courier, monospace",
-    color: PAPER,
-    cursor: "pointer",
-  },
-  suggestItemActive: { background: GOLD, color: INK },
-  sceneCard: {
-    padding: "8px",
-    border: `1px solid ${LINE}`,
-    borderRadius: "3px",
-    marginBottom: "8px",
-  },
-  warningRow: {
-    fontSize: "12px",
-    color: GOLD,
-    padding: "4px 0",
-    borderBottom: `1px solid ${LINE}`,
-  },
-};
+const THEMES = [
+  { id: "classic", name: "Classic Ink & Gold", ink: "#1b1a17", paper: "#fbf9f4", text: "#fbf9f4", gold: "#c9a24c" },
+  { id: "midnight", name: "Midnight Blue", ink: "#111827", paper: "#f7f8fa", text: "#e7ecf5", gold: "#7ea6d8" },
+  { id: "noir", name: "Noir", ink: "#121212", paper: "#fafafa", text: "#eeeeee", gold: "#c9c9c9" },
+  { id: "crimson", name: "Crimson Draft", ink: "#241012", paper: "#fbf5f4", text: "#f3e3e1", gold: "#c8555f" },
+  { id: "forest", name: "Forest", ink: "#0f1f17", paper: "#f6faf6", text: "#e3eee4", gold: "#82b384" },
+  { id: "studio", name: "Light Studio", ink: "#f2efe7", paper: "#ffffff", text: "#2a251d", gold: "#b5651d" },
+];
 
-const GLOBAL_CSS = `
+const DEFAULT_THEME = THEMES[0];
+const THEME_STORAGE_KEY = "slugline_theme_v1";
+
+function buildStyles(t) {
+  const mute = mix(t.ink, t.text, 0.55);
+  const line = mix(t.ink, t.text, 0.14);
+  return {
+    app: {
+      display: "flex",
+      flexDirection: "column",
+      height: "100vh",
+      background: t.ink,
+      color: t.text,
+      fontFamily: "'Helvetica Neue', Arial, sans-serif",
+    },
+    header: {
+      display: "flex",
+      alignItems: "center",
+      gap: "16px",
+      padding: "10px 18px",
+      borderBottom: `1px solid ${line}`,
+      flexWrap: "wrap",
+    },
+    brand: { display: "flex", alignItems: "center", gap: "8px", minWidth: "120px" },
+    brandMark: { color: t.gold, fontSize: "18px" },
+    brandText: { fontSize: "13px", letterSpacing: "3px", fontWeight: 700, color: t.gold },
+    titleFields: { display: "flex", gap: "8px", flex: 1, minWidth: "240px" },
+    titleInput: {
+      background: "transparent",
+      border: "none",
+      borderBottom: `1px solid ${line}`,
+      color: t.text,
+      fontSize: "14px",
+      padding: "4px 2px",
+      flex: 2,
+      minWidth: "120px",
+      outline: "none",
+    },
+    authorInput: {
+      background: "transparent",
+      border: "none",
+      borderBottom: `1px solid ${line}`,
+      color: mute,
+      fontSize: "13px",
+      padding: "4px 2px",
+      flex: 1,
+      minWidth: "100px",
+      outline: "none",
+    },
+    headerActions: { display: "flex", gap: "8px" },
+    btn: {
+      background: "transparent",
+      color: t.text,
+      border: `1px solid ${line}`,
+      borderRadius: "3px",
+      padding: "7px 12px",
+      fontSize: "12px",
+      cursor: "pointer",
+      letterSpacing: "0.5px",
+    },
+    btnPrimary: {
+      background: t.gold,
+      color: t.ink,
+      border: `1px solid ${t.gold}`,
+      borderRadius: "3px",
+      padding: "7px 14px",
+      fontSize: "12px",
+      fontWeight: 700,
+      cursor: "pointer",
+      letterSpacing: "0.5px",
+    },
+    body: { flex: 1, display: "flex", overflow: "hidden" },
+    rail: {
+      width: "168px",
+      borderRight: `1px solid ${line}`,
+      padding: "16px 10px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "6px",
+      overflowY: "auto",
+      overflowX: "hidden",
+      flexShrink: 0,
+      transition: "width 0.15s ease",
+    },
+    railCollapsed: { width: "48px", padding: "16px 6px", alignItems: "center" },
+    railToggle: {
+      background: "transparent",
+      border: `1px solid ${line}`,
+      color: mute,
+      borderRadius: "3px",
+      padding: "6px 8px",
+      fontSize: "11px",
+      cursor: "pointer",
+      marginBottom: "8px",
+      width: "100%",
+    },
+    railLabel: { fontSize: "10px", letterSpacing: "2px", color: mute, marginBottom: "4px", paddingLeft: "4px" },
+    railBtn: {
+      background: "transparent",
+      border: `1px solid ${line}`,
+      color: t.text,
+      borderRadius: "3px",
+      padding: "8px 10px",
+      fontSize: "12px",
+      textAlign: "left",
+      cursor: "pointer",
+      width: "100%",
+    },
+    railBtnCollapsed: { textAlign: "center", padding: "8px 0", fontWeight: 700 },
+    railBtnActive: { background: t.gold, color: t.ink, border: `1px solid ${t.gold}`, fontWeight: 700 },
+    railHint: { marginTop: "18px", fontSize: "10.5px", color: mute, lineHeight: 1.8, paddingLeft: "4px" },
+    pageWrap: { flex: 1, overflowY: "auto", padding: "32px 24px", display: "flex", justifyContent: "center" },
+    page: {
+      background: t.paper,
+      color: "#1a1a1a",
+      width: "8.5in",
+      minHeight: "11in",
+      padding: "1in 1in 1in 1.5in",
+      boxShadow: "0 8px 30px rgba(0,0,0,0.5)",
+      flexShrink: 0,
+    },
+    line: {
+      display: "block",
+      width: "100%",
+      background: "transparent",
+      border: "none",
+      outline: "none",
+      resize: "none",
+      overflow: "hidden",
+      fontFamily: "'Courier New', Courier, monospace",
+      fontSize: "12pt",
+      lineHeight: 1.5,
+      color: "#1a1a1a",
+      padding: 0,
+      margin: 0,
+    },
+    statusBar: {
+      display: "flex",
+      justifyContent: "space-between",
+      padding: "6px 18px",
+      borderTop: `1px solid ${line}`,
+      fontSize: "11.5px",
+      color: mute,
+    },
+    statusPill: {
+      background: `${t.gold}26`,
+      color: t.gold,
+      border: `1px solid ${t.gold}`,
+      borderRadius: "3px",
+      padding: "2px 8px",
+      fontWeight: 700,
+      letterSpacing: "0.5px",
+      fontSize: "10.5px",
+    },
+    statusText: {},
+    overlay: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.35)",
+      zIndex: 40,
+    },
+    contextMenu: {
+      position: "fixed",
+      zIndex: 50,
+      background: t.ink,
+      border: `1px solid ${t.gold}`,
+      borderRadius: "4px",
+      padding: "6px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "2px",
+      boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
+      minWidth: "160px",
+    },
+    contextMenuBtn: {
+      background: "transparent",
+      border: "none",
+      color: t.text,
+      textAlign: "left",
+      padding: "8px 10px",
+      fontSize: "12.5px",
+      cursor: "pointer",
+      borderRadius: "3px",
+    },
+    panel: {
+      position: "fixed",
+      top: 0,
+      right: 0,
+      bottom: 0,
+      width: "320px",
+      maxWidth: "90vw",
+      background: t.ink,
+      borderLeft: `1px solid ${line}`,
+      padding: "18px",
+      overflowY: "auto",
+      zIndex: 50,
+      boxShadow: "-8px 0 30px rgba(0,0,0,0.5)",
+    },
+    panelHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" },
+    elementRow: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "6px 8px",
+      fontSize: "12.5px",
+      borderBottom: `1px solid ${line}`,
+    },
+    elementRemove: {
+      background: "transparent",
+      border: "none",
+      color: mute,
+      cursor: "pointer",
+      fontSize: "15px",
+      lineHeight: 1,
+      padding: "0 4px",
+    },
+    dualRow: { display: "flex", gap: "0.3in", width: "100%" },
+    dualCol: { flex: 1, minWidth: 0 },
+    suggestDropdown: {
+      position: "absolute",
+      zIndex: 30,
+      background: t.ink,
+      border: `1px solid ${t.gold}`,
+      borderRadius: "3px",
+      marginTop: "2px",
+      overflow: "hidden",
+      boxShadow: "0 6px 16px rgba(0,0,0,0.4)",
+    },
+    suggestItem: {
+      padding: "6px 10px",
+      fontSize: "11.5px",
+      fontFamily: "'Courier New', Courier, monospace",
+      color: t.text,
+      cursor: "pointer",
+    },
+    suggestItemActive: { background: t.gold, color: t.ink },
+    sceneCard: {
+      padding: "8px",
+      border: `1px solid ${line}`,
+      borderRadius: "3px",
+      marginBottom: "8px",
+    },
+    warningRow: {
+      fontSize: "12px",
+      color: t.gold,
+      padding: "4px 0",
+      borderBottom: `1px solid ${line}`,
+    },
+    swatch: {
+      width: "44px",
+      height: "44px",
+      borderRadius: "6px",
+      cursor: "pointer",
+      padding: 0,
+    },
+    colorRow: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      fontSize: "12.5px",
+      padding: "4px 0",
+    },
+  };
+}
+
+function buildGlobalCss(t) {
+  const line = mix(t.ink, t.text, 0.14);
+  return `
   * { box-sizing: border-box; }
   textarea::placeholder { color: #b9b3a0; }
-  textarea:focus { background: rgba(201,162,76,0.06); }
+  textarea:focus { background: rgba(0,0,0,0.03); }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-track { background: ${INK}; }
-  ::-webkit-scrollbar-thumb { background: ${LINE}; border-radius: 5px; }
+  ::-webkit-scrollbar-track { background: ${t.ink}; }
+  ::-webkit-scrollbar-thumb { background: ${line}; border-radius: 5px; }
+  input[type="color"] { width: 36px; height: 26px; border: none; border-radius: 4px; padding: 0; background: transparent; cursor: pointer; }
   @media print {
     .no-print { display: none !important; }
     body, html { background: white !important; }
     .print-page { box-shadow: none !important; margin: 0 !important; }
   }
 `;
+}
