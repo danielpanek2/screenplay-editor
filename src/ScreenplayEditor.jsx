@@ -27,6 +27,8 @@ const NEXT_ON_ENTER = {
 
 const UPPER_TYPES = new Set(["scene_heading", "character", "transition"]);
 
+const EXTENSIONS = ["V.O.", "O.S.", "CONT'D", "FILTERED", "SUBTITLED", "PRE-LAP"];
+
 const TYPE_STYLE = {
   scene_heading: { width: "100%", marginLeft: "0" },
   action: { width: "100%", marginLeft: "0" },
@@ -164,6 +166,41 @@ function parseFountain(raw) {
 }
 
 /* ---------------------------------------------------------------
+   Tracked elements (character intros, props, sound cues manually
+   marked in Action lines) + report export
+--------------------------------------------------------------- */
+const CATEGORIES = {
+  character: "Character",
+  prop: "Prop / Object",
+  sound: "Sound Cue",
+};
+
+function generateElementsReport(elements, title) {
+  const out = [];
+  out.push(`# Element Report${title.trim() ? " — " + title.trim() : ""}`);
+  out.push("");
+  Object.keys(CATEGORIES).forEach((cat) => {
+    const items = elements.filter((e) => e.category === cat);
+    if (items.length === 0) return;
+    const counts = {};
+    items.forEach((it) => {
+      const key = it.text.trim().toUpperCase();
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    out.push(`## ${CATEGORIES[cat]}`);
+    Object.keys(counts)
+      .sort()
+      .forEach((key) => {
+        const n = counts[key];
+        const flag = n > 1 ? " — appears capitalized more than once, check continuity" : "";
+        out.push(`- ${key} (${n} mention${n === 1 ? "" : "s"})${flag}`);
+      });
+    out.push("");
+  });
+  return out.join("\n");
+}
+
+/* ---------------------------------------------------------------
    Component
 --------------------------------------------------------------- */
 export default function ScreenplayEditor() {
@@ -173,6 +210,10 @@ export default function ScreenplayEditor() {
   const [focusedId, setFocusedId] = useState(blocks[0].id);
   const [pendingFocus, setPendingFocus] = useState(null);
   const [railCollapsed, setRailCollapsed] = useState(false);
+  const [elements, setElements] = useState([]);
+  const [activeSelection, setActiveSelection] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null);
+  const [showElementsPanel, setShowElementsPanel] = useState(false);
   const fileInputRef = useRef(null);
   const textRefs = useRef({});
 
@@ -216,6 +257,66 @@ export default function ScreenplayEditor() {
       prev.map((b) => (b.id === id ? { ...b, type, text: UPPER_TYPES.has(type) ? b.text.toUpperCase() : b.text } : b))
     );
     setPendingFocus({ id, pos: "end" });
+  };
+
+  const toggleExtension = (id, ext) => {
+    setBlocks((prev) =>
+      prev.map((b) => {
+        if (b.id !== id) return b;
+        const stripped = b.text.replace(/\s*\([^()]*\)\s*$/, "").trimEnd();
+        const match = b.text.match(/\(([^()]*)\)\s*$/);
+        const current = match ? match[1].trim().toUpperCase() : null;
+        const text = current === ext ? stripped : `${stripped} (${ext})`;
+        return { ...b, text };
+      })
+    );
+    setPendingFocus({ id, pos: "end" });
+  };
+
+  const markElement = (blockId, start, end, category) => {
+    const block = blocks.find((b) => b.id === blockId);
+    if (!block) return;
+    const selected = block.text.slice(start, end);
+    if (!selected.trim()) return;
+    const newText = block.text.slice(0, start) + selected.toUpperCase() + block.text.slice(end);
+    setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, text: newText } : b)));
+    setElements((prev) => [...prev, { id: newId(), category, text: selected.trim() }]);
+    setActiveSelection(null);
+    setContextMenu(null);
+    setPendingFocus({ id: blockId, pos: "at", at: end });
+  };
+
+  const removeElement = (id) => {
+    setElements((prev) => prev.filter((e) => e.id !== id));
+  };
+
+  const handleExportElements = () => {
+    const text = generateElementsReport(elements, title);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    a.href = url;
+    a.download = `${safe}_elements.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleSelect = (e, block) => {
+    if (block.type !== "action") return;
+    const { selectionStart: s, selectionEnd: en } = e.target;
+    if (s !== en) setActiveSelection({ blockId: block.id, start: s, end: en });
+    else if (activeSelection?.blockId === block.id) setActiveSelection(null);
+  };
+
+  const handleContextMenu = (e, block) => {
+    if (block.type !== "action") return;
+    const { selectionStart: s, selectionEnd: en } = e.target;
+    if (s === en) return; // no selection: allow the browser's normal menu
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, blockId: block.id, start: s, end: en });
   };
 
   const handleKeyDown = (e, id) => {
@@ -349,6 +450,9 @@ export default function ScreenplayEditor() {
           <button style={styles.btn} onClick={handleLoadClick}>Load</button>
           <input ref={fileInputRef} type="file" accept=".fountain,.txt" style={{ display: "none" }} onChange={handleFile} />
           <button style={styles.btn} onClick={() => window.print()}>Print</button>
+          <button style={styles.btn} onClick={() => setShowElementsPanel(true)}>
+            Elements{elements.length > 0 ? ` (${elements.length})` : ""}
+          </button>
           <button style={styles.btnPrimary} onClick={handleSave}>Save .fountain</button>
         </div>
       </div>
@@ -381,12 +485,52 @@ export default function ScreenplayEditor() {
             </button>
           ))}
 
+          {!railCollapsed && focusedType === "character" && (
+            <>
+              <div style={{ ...styles.railLabel, marginTop: "14px" }}>Extension</div>
+              {EXTENSIONS.map((ext) => {
+                const focusedBlock = blocks.find((b) => b.id === focusedId);
+                const match = focusedBlock?.text.match(/\(([^()]*)\)\s*$/);
+                const active = match && match[1].trim().toUpperCase() === ext;
+                return (
+                  <button
+                    key={ext}
+                    onClick={() => toggleExtension(focusedId, ext)}
+                    style={{
+                      ...styles.railBtn,
+                      fontSize: "11px",
+                      ...(active ? styles.railBtnActive : {}),
+                    }}
+                  >
+                    {ext}
+                  </button>
+                );
+              })}
+            </>
+          )}
+
+          {!railCollapsed && focusedType === "action" && activeSelection?.blockId === focusedId && (
+            <>
+              <div style={{ ...styles.railLabel, marginTop: "14px" }}>Mark Selection</div>
+              {Object.entries(CATEGORIES).map(([cat, label]) => (
+                <button
+                  key={cat}
+                  onClick={() => markElement(activeSelection.blockId, activeSelection.start, activeSelection.end, cat)}
+                  style={{ ...styles.railBtn, fontSize: "11px" }}
+                >
+                  {label}
+                </button>
+              ))}
+            </>
+          )}
+
           {!railCollapsed && (
             <div style={styles.railHint}>
               <div><b>Tab</b> — cycle format</div>
               <div><b>Shift+Tab</b> — cycle back</div>
               <div><b>Enter</b> — new element</div>
               <div><b>Shift+Enter</b> — line break</div>
+              <div style={{ marginTop: "8px" }}>Select text in Action to mark a character/prop/sound cue.</div>
             </div>
           )}
         </div>
@@ -401,6 +545,8 @@ export default function ScreenplayEditor() {
                 value={b.text}
                 placeholder={PLACEHOLDER[b.type]}
                 onFocus={() => setFocusedId(b.id)}
+                onSelect={(e) => handleSelect(e, b)}
+                onContextMenu={(e) => handleContextMenu(e, b)}
                 onChange={(e) => {
                   updateText(b.id, e.target.value);
                   resize(e.target);
@@ -424,6 +570,56 @@ export default function ScreenplayEditor() {
         <span style={styles.statusPill}>{LABELS[focusedType]}</span>
         <span style={styles.statusText}>{wordCount} words · ~{pageEstimate} page{pageEstimate === 1 ? "" : "s"}</span>
       </div>
+
+      {/* Right-click mark menu */}
+      {contextMenu && (
+        <>
+          <div style={styles.overlay} className="no-print" onClick={() => setContextMenu(null)} />
+          <div style={{ ...styles.contextMenu, left: contextMenu.x, top: contextMenu.y }} className="no-print">
+            {Object.entries(CATEGORIES).map(([cat, label]) => (
+              <button
+                key={cat}
+                style={styles.contextMenuBtn}
+                onClick={() => markElement(contextMenu.blockId, contextMenu.start, contextMenu.end, cat)}
+              >
+                Mark as {label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Elements panel */}
+      {showElementsPanel && (
+        <>
+          <div style={styles.overlay} className="no-print" onClick={() => setShowElementsPanel(false)} />
+          <div style={styles.panel} className="no-print">
+            <div style={styles.panelHeader}>
+              <span style={styles.brandText}>ELEMENTS</span>
+              <button style={styles.btn} onClick={() => setShowElementsPanel(false)}>Close</button>
+            </div>
+            <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportElements}>
+              Export Report
+            </button>
+            {elements.length === 0 && <div style={{ color: MUTE, fontSize: "13px" }}>Nothing marked yet. Select text in an Action line to tag a character, prop, or sound cue.</div>}
+            {Object.entries(CATEGORIES).map(([cat, label]) => {
+              const items = elements.filter((e) => e.category === cat);
+              if (items.length === 0) return null;
+              return (
+                <div key={cat} style={{ marginBottom: "18px" }}>
+                  <div style={styles.railLabel}>{label}</div>
+                  {items.map((it) => (
+                    <div key={it.id} style={styles.elementRow}>
+                      <span>{it.text}</span>
+                      <button style={styles.elementRemove} onClick={() => removeElement(it.id)}>×</button>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -586,6 +782,67 @@ const styles = {
     fontSize: "10.5px",
   },
   statusText: {},
+  overlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.35)",
+    zIndex: 40,
+  },
+  contextMenu: {
+    position: "fixed",
+    zIndex: 50,
+    background: INK,
+    border: `1px solid ${GOLD}`,
+    borderRadius: "4px",
+    padding: "6px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+    boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
+    minWidth: "160px",
+  },
+  contextMenuBtn: {
+    background: "transparent",
+    border: "none",
+    color: PAPER,
+    textAlign: "left",
+    padding: "8px 10px",
+    fontSize: "12.5px",
+    cursor: "pointer",
+    borderRadius: "3px",
+  },
+  panel: {
+    position: "fixed",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: "320px",
+    maxWidth: "90vw",
+    background: INK,
+    borderLeft: `1px solid ${LINE}`,
+    padding: "18px",
+    overflowY: "auto",
+    zIndex: 50,
+    boxShadow: "-8px 0 30px rgba(0,0,0,0.5)",
+  },
+  panelHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" },
+  elementRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "6px 8px",
+    fontSize: "12.5px",
+    borderBottom: `1px solid ${LINE}`,
+  },
+  elementRemove: {
+    background: "transparent",
+    border: "none",
+    color: MUTE,
+    cursor: "pointer",
+    fontSize: "15px",
+    lineHeight: 1,
+    padding: "0 4px",
+  },
 };
 
 const GLOBAL_CSS = `
