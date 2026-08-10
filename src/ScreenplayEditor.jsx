@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
+import { jsPDF } from "jspdf";
 
 /* ---------------------------------------------------------------
    Element types, cycle order, and per-type layout (inches, mapped
@@ -381,6 +382,103 @@ function buildPageGroups(blocks) {
 }
 
 /* ---------------------------------------------------------------
+   PDF export — real text (not a rasterized screenshot), using
+   jsPDF's built-in Courier font at the same margins/indents as the
+   on-screen page, including dual dialogue as side-by-side columns.
+--------------------------------------------------------------- */
+const PDF_PAGE_W = 8.5;
+const PDF_PAGE_H = 11;
+const PDF_MARGIN_TOP = 1;
+const PDF_MARGIN_BOTTOM = 1;
+const PDF_MARGIN_LEFT = 1.5;
+const PDF_MARGIN_RIGHT = 1;
+const PDF_CONTENT_WIDTH = PDF_PAGE_W - PDF_MARGIN_LEFT - PDF_MARGIN_RIGHT;
+const PDF_LINE_H = 1 / 6; // 6 lines per inch — standard screenplay spacing
+
+const PDF_LAYOUT = {
+  scene_heading: { left: 0, width: PDF_CONTENT_WIDTH },
+  action: { left: 0, width: PDF_CONTENT_WIDTH },
+  character: { left: 2, width: 3 },
+  parenthetical: { left: 1.6, width: 2.3 },
+  dialogue: { left: 1, width: 3.5 },
+  transition: { left: 0, width: PDF_CONTENT_WIDTH },
+};
+
+function buildScreenplayPdf(blocks, title, author) {
+  const doc = new jsPDF({ unit: "in", format: "letter" });
+  doc.setFont("courier", "normal");
+  doc.setFontSize(12);
+
+  if (title.trim() || author.trim()) {
+    doc.setFont("courier", "bold");
+    doc.text(title.trim() || "Untitled", PDF_PAGE_W / 2, 4, { align: "center" });
+    doc.setFont("courier", "normal");
+    if (author.trim()) {
+      doc.text("by", PDF_PAGE_W / 2, 4.6, { align: "center" });
+      doc.text(author.trim(), PDF_PAGE_W / 2, 4.9, { align: "center" });
+    }
+    doc.addPage();
+  }
+
+  let y = PDF_MARGIN_TOP;
+
+  const ensureRoom = (linesNeeded) => {
+    if (y + linesNeeded * PDF_LINE_H > PDF_PAGE_H - PDF_MARGIN_BOTTOM) {
+      doc.addPage();
+      y = PDF_MARGIN_TOP;
+    }
+  };
+
+  const writeBlock = (b, leftOverride, widthOverride) => {
+    if (!b.text.trim()) return;
+    const left = PDF_MARGIN_LEFT + (leftOverride ?? PDF_LAYOUT[b.type].left);
+    const width = widthOverride ?? PDF_LAYOUT[b.type].width;
+    doc.setFont("courier", b.type === "character" || b.type === "scene_heading" ? "bold" : "normal");
+    const lines = doc.splitTextToSize(b.text, width);
+    if (b.type === "transition") {
+      ensureRoom(lines.length);
+      lines.forEach((ln) => {
+        doc.text(ln, PDF_MARGIN_LEFT + PDF_CONTENT_WIDTH, y, { align: "right" });
+        y += PDF_LINE_H;
+      });
+      return;
+    }
+    ensureRoom(lines.length);
+    lines.forEach((ln) => {
+      doc.text(ln, left, y);
+      y += PDF_LINE_H;
+    });
+  };
+
+  const groups = buildPageGroups(blocks);
+  let first = true;
+  groups.forEach((g) => {
+    if (!first) y += PDF_LINE_H;
+    first = false;
+
+    if (g.kind === "single") {
+      writeBlock(g.block);
+    } else if (g.kind === "cue") {
+      writeBlock(g.character);
+      g.body.forEach((bl) => writeBlock(bl));
+    } else {
+      const leftCol = { left: 0, width: 2.8 };
+      const rightCol = { left: 3.2, width: 2.8 };
+      const yStart = y;
+      writeBlock(g.left.character, leftCol.left, leftCol.width);
+      g.left.body.forEach((bl) => writeBlock(bl, leftCol.left, leftCol.width));
+      const yAfterLeft = y;
+      y = yStart;
+      writeBlock(g.right.character, rightCol.left, rightCol.width);
+      g.right.body.forEach((bl) => writeBlock(bl, rightCol.left, rightCol.width));
+      y = Math.max(yAfterLeft, y);
+    }
+  });
+
+  return doc;
+}
+
+/* ---------------------------------------------------------------
    Component
 --------------------------------------------------------------- */
 export default function ScreenplayEditor() {
@@ -723,6 +821,12 @@ export default function ScreenplayEditor() {
     URL.revokeObjectURL(url);
   };
 
+  const handleExportPDF = () => {
+    const doc = buildScreenplayPdf(blocks, title, author);
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    doc.save(`${safe}.pdf`);
+  };
+
   const handleLoadClick = () => fileInputRef.current?.click();
 
   const handleFile = (e) => {
@@ -856,6 +960,7 @@ export default function ScreenplayEditor() {
           </button>
           <button style={styles.btn} onClick={() => setShowScriptReport(true)}>Report</button>
           <button style={styles.btn} onClick={() => setShowAppearance(true)} title="Appearance">⚙ Theme</button>
+          <button style={styles.btn} onClick={handleExportPDF}>PDF</button>
           <button style={styles.btnPrimary} onClick={handleSave}>Save .fountain</button>
         </div>
       </div>
