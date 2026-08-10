@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 
 /* ---------------------------------------------------------------
    Element types, cycle order, and per-type layout (inches, mapped
@@ -51,6 +51,45 @@ let idCounter = 1;
 const newId = () => `b${idCounter++}`;
 
 /* ---------------------------------------------------------------
+   Storage layer — currently browser localStorage. Kept behind an
+   async interface so swapping in a cloud backend later (Cloudflare
+   KV, etc.) only means changing what's inside these two functions,
+   not how the rest of the app calls them.
+--------------------------------------------------------------- */
+const STORAGE_KEY = "slugline_screenplay_v1";
+
+async function saveScriptData(data) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    return true;
+  } catch (e) {
+    console.error("Autosave failed", e);
+    return false;
+  }
+}
+
+async function loadScriptData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    console.error("Autosave load failed", e);
+    return null;
+  }
+}
+
+// Restored blocks/elements carry ids from a previous session's counter;
+// bump the counter past them so newly created blocks never collide.
+function bumpIdCounter(items) {
+  let max = 0;
+  items.forEach((it) => {
+    const n = parseInt(String(it.id).replace(/[^\d]/g, ""), 10);
+    if (!isNaN(n) && n > max) max = n;
+  });
+  if (max + 1 > idCounter) idCounter = max + 1;
+}
+
+/* ---------------------------------------------------------------
    Fountain export
 --------------------------------------------------------------- */
 function generateFountain(blocks, title, author) {
@@ -84,6 +123,8 @@ function generateFountain(blocks, title, author) {
       if (!t.startsWith("(")) t = "(" + t;
       if (!t.endsWith(")")) t = t + ")";
       out.push(t);
+    } else if (b.type === "character") {
+      out.push(text + (b.dual ? " ^" : ""));
     } else {
       out.push(text);
     }
@@ -111,7 +152,7 @@ function parseFountain(raw) {
   while (i < lines.length && lines[i].trim() === "") i++;
 
   const blocksOut = [];
-  const push = (type, text) => blocksOut.push({ id: newId(), type, text });
+  const push = (type, text, extra = {}) => blocksOut.push({ id: newId(), type, text, ...extra });
   let lastNonBlankType = null;
   let lastBlank = true;
 
@@ -155,6 +196,10 @@ function parseFountain(raw) {
 
     if (!lastBlank && type === "action" && blocksOut.length > 0 && blocksOut[blocksOut.length - 1].type === "action") {
       blocksOut[blocksOut.length - 1].text += "\n" + content;
+    } else if (type === "character") {
+      const dualMatch = /\^\s*$/.test(content);
+      const cleaned = dualMatch ? content.replace(/\^\s*$/, "").trim() : content;
+      push(type, cleaned, dualMatch ? { dual: true } : {});
     } else {
       push(type, content);
     }
@@ -224,6 +269,118 @@ function parseElementsReport(raw) {
 }
 
 /* ---------------------------------------------------------------
+   Scene report + character name consistency check
+--------------------------------------------------------------- */
+function computeScenes(blocks) {
+  const scenes = [];
+  let current = null;
+  blocks.forEach((b) => {
+    if (b.type === "scene_heading") {
+      if (current) scenes.push(current);
+      current = { heading: b.text.trim() || "(untitled scene)", characters: new Set(), wordCount: 0 };
+    } else {
+      if (!current) current = { heading: "(before first scene heading)", characters: new Set(), wordCount: 0 };
+      if (b.type === "character") {
+        const name = b.text.replace(/\s*\^\s*$/, "").replace(/\s*\([^()]*\)\s*$/, "").trim();
+        if (name) current.characters.add(name);
+      }
+      current.wordCount += b.text.trim() ? b.text.trim().split(/\s+/).length : 0;
+    }
+  });
+  if (current) scenes.push(current);
+  return scenes.map((s) => ({
+    ...s,
+    characters: Array.from(s.characters).sort(),
+    pages: Math.max(0.1, Math.round((s.wordCount / 230) * 10) / 10),
+  }));
+}
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+function findNameWarnings(names) {
+  const unique = Array.from(new Set(names.map((n) => n.trim().toUpperCase()))).filter(Boolean);
+  const warnings = [];
+  for (let i = 0; i < unique.length; i++) {
+    for (let j = i + 1; j < unique.length; j++) {
+      const a = unique[i], b = unique[j];
+      const maxLen = Math.max(a.length, b.length);
+      if (maxLen < 3) continue;
+      const threshold = maxLen <= 4 ? 1 : 2;
+      if (levenshtein(a, b) <= threshold) warnings.push([a, b]);
+    }
+  }
+  return warnings;
+}
+
+function generateScriptReportText(scenes, warnings, title) {
+  const out = [];
+  const allChars = new Set();
+  scenes.forEach((s) => s.characters.forEach((c) => allChars.add(c)));
+  const totalPages = Math.round(scenes.reduce((sum, s) => sum + s.pages, 0) * 10) / 10;
+  out.push(`# Scene Report${title.trim() ? " — " + title.trim() : ""}`);
+  out.push("");
+  out.push(`${scenes.length} scene${scenes.length === 1 ? "" : "s"} · ${allChars.size} character${allChars.size === 1 ? "" : "s"} · ~${totalPages} pages`);
+  out.push("");
+  scenes.forEach((s, i) => {
+    out.push(`**${i + 1}. ${s.heading}**`);
+    out.push(`- Characters: ${s.characters.length ? s.characters.join(", ") : "—"}`);
+    out.push(`- Est. length: ~${s.pages} page${s.pages === 1 ? "" : "s"}`);
+    out.push("");
+  });
+  if (warnings.length > 0) {
+    out.push("## Possible Name Inconsistencies");
+    warnings.forEach(([a, b]) => out.push(`- "${a}" vs "${b}" — check if these are meant to be the same character`));
+    out.push("");
+  }
+  return out.join("\n");
+}
+
+/* ---------------------------------------------------------------
+   Groups blocks for rendering: pairs a Character marked "dual"
+   with the immediately preceding character+dialogue group so they
+   can render as two side-by-side columns.
+--------------------------------------------------------------- */
+function buildPageGroups(blocks) {
+  const groups = [];
+  let i = 0;
+  while (i < blocks.length) {
+    const b = blocks[i];
+    if (b.type === "character") {
+      const body = [];
+      let j = i + 1;
+      while (j < blocks.length && (blocks[j].type === "dialogue" || blocks[j].type === "parenthetical")) {
+        body.push(blocks[j]);
+        j++;
+      }
+      const cue = { kind: "cue", character: b, body };
+      const prev = groups[groups.length - 1];
+      if (b.dual && prev && prev.kind === "cue") {
+        groups.pop();
+        groups.push({ kind: "dual", left: prev, right: cue });
+      } else {
+        groups.push(cue);
+      }
+      i = j;
+    } else {
+      groups.push({ kind: "single", block: b });
+      i++;
+    }
+  }
+  return groups;
+}
+
+/* ---------------------------------------------------------------
    Component
 --------------------------------------------------------------- */
 export default function ScreenplayEditor() {
@@ -237,9 +394,14 @@ export default function ScreenplayEditor() {
   const [activeSelection, setActiveSelection] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [showElementsPanel, setShowElementsPanel] = useState(false);
+  const [showScriptReport, setShowScriptReport] = useState(false);
+  const [suggestIndex, setSuggestIndex] = useState(-1);
+  const [loaded, setLoaded] = useState(false);
+  const [lastSaved, setLastSaved] = useState(null);
   const fileInputRef = useRef(null);
   const elementsFileInputRef = useRef(null);
   const textRefs = useRef({});
+  const autosaveTimer = useRef(null);
 
   const resize = (el) => {
     if (!el) return;
@@ -250,6 +412,43 @@ export default function ScreenplayEditor() {
   useEffect(() => {
     Object.values(textRefs.current).forEach(resize);
   }, [blocks]);
+
+  // Load any autosaved script on first mount.
+  useEffect(() => {
+    let cancelled = false;
+    loadScriptData().then((data) => {
+      if (cancelled || !data) {
+        setLoaded(true);
+        return;
+      }
+      bumpIdCounter([...(data.blocks || []), ...(data.elements || [])]);
+      const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
+      setTitle(data.title || "Untitled Screenplay");
+      setAuthor(data.author || "");
+      setBlocks(restoredBlocks);
+      setElements(data.elements || []);
+      setFocusedId(restoredBlocks[0].id);
+      if (data.savedAt) setLastSaved(data.savedAt);
+      setLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounced autosave whenever the script changes.
+  useEffect(() => {
+    if (!loaded) return;
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      const savedAt = new Date().toISOString();
+      saveScriptData({ title, author, blocks, elements, savedAt }).then((ok) => {
+        if (ok) setLastSaved(savedAt);
+      });
+    }, 800);
+    return () => clearTimeout(autosaveTimer.current);
+  }, [blocks, title, author, elements, loaded]);
 
   useEffect(() => {
     if (!pendingFocus) return;
@@ -295,6 +494,65 @@ export default function ScreenplayEditor() {
       })
     );
     setPendingFocus({ id, pos: "end" });
+  };
+
+  const toggleDual = (id) => {
+    setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, dual: !b.dual } : b)));
+  };
+
+  const knownCharacterNames = useMemo(() => {
+    const set = new Set();
+    blocks.forEach((b) => {
+      if (b.type === "character") {
+        const name = b.text.replace(/\s*\^\s*$/, "").replace(/\s*\([^()]*\)\s*$/, "").trim();
+        if (name) set.add(name);
+      }
+    });
+    return Array.from(set).sort();
+  }, [blocks]);
+
+  const knownSceneHeadings = useMemo(() => {
+    const set = new Set();
+    blocks.forEach((b) => {
+      if (b.type === "scene_heading" && b.text.trim()) set.add(b.text.trim());
+    });
+    return Array.from(set).sort();
+  }, [blocks]);
+
+  const scenes = useMemo(() => computeScenes(blocks), [blocks]);
+
+  const nameWarnings = useMemo(() => {
+    const allNames = [...knownCharacterNames, ...elements.filter((e) => e.category === "character").map((e) => e.text)];
+    return findNameWarnings(allNames);
+  }, [knownCharacterNames, elements]);
+
+  const getSuggestionsFor = (block) => {
+    if (!block) return [];
+    if (block.type === "character") {
+      const q = block.text.trim().toUpperCase();
+      if (!q) return [];
+      return knownCharacterNames.filter((n) => n.toUpperCase().startsWith(q) && n.toUpperCase() !== q).slice(0, 5);
+    }
+    if (block.type === "scene_heading") {
+      const q = block.text.trim().toUpperCase();
+      if (!q) return ["INT. ", "EXT. ", "INT./EXT. "];
+      return knownSceneHeadings.filter((h) => h.toUpperCase().startsWith(q) && h.toUpperCase() !== q).slice(0, 6);
+    }
+    return [];
+  };
+
+  const handleExportScriptReport = () => {
+    const text = generateScriptReportText(scenes, nameWarnings, title);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    a.href = url;
+    a.download = `${safe}_scenes.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const markElement = (blockId, start, end, category) => {
@@ -347,6 +605,27 @@ export default function ScreenplayEditor() {
     const idx = blocks.findIndex((b) => b.id === id);
     const block = blocks[idx];
     const el = e.target;
+
+    const suggestions = getSuggestionsFor(block);
+    if (suggestions.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSuggestIndex((i) => Math.min(i + 1, suggestions.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSuggestIndex((i) => Math.max(i - 1, -1));
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey && suggestIndex >= 0) {
+        e.preventDefault();
+        const chosen = suggestions[suggestIndex];
+        updateText(id, chosen);
+        setSuggestIndex(-1);
+        return;
+      }
+    }
 
     if (e.key === "Tab") {
       e.preventDefault();
@@ -401,10 +680,13 @@ export default function ScreenplayEditor() {
   const handleNew = () => {
     if (!window.confirm("Start a new script? Unsaved changes will be lost.")) return;
     const id = newId();
-    setBlocks([{ id, type: "scene_heading", text: "" }]);
+    const blank = [{ id, type: "scene_heading", text: "" }];
+    setBlocks(blank);
     setTitle("Untitled Screenplay");
     setAuthor("");
+    setElements([]);
     setPendingFocus({ id, pos: "start" });
+    saveScriptData({ title: "Untitled Screenplay", author: "", blocks: blank, elements: [], savedAt: new Date().toISOString() });
   };
 
   const handleSave = () => {
@@ -429,10 +711,12 @@ export default function ScreenplayEditor() {
     const reader = new FileReader();
     reader.onload = () => {
       const { title: t, author: a, blocks: b } = parseFountain(String(reader.result));
-      setTitle(t || file.name.replace(/\.[^.]+$/, ""));
+      const newTitle = t || file.name.replace(/\.[^.]+$/, "");
+      setTitle(newTitle);
       setAuthor(a || "");
       setBlocks(b);
       setPendingFocus({ id: b[0].id, pos: "start" });
+      saveScriptData({ title: newTitle, author: a || "", blocks: b, elements, savedAt: new Date().toISOString() });
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -459,6 +743,58 @@ export default function ScreenplayEditor() {
   const pageEstimate = Math.max(1, Math.round(wordCount / 230));
 
   const focusedType = blocks.find((b) => b.id === focusedId)?.type || "action";
+
+  const renderField = (b, dualMode = false) => {
+    const isFocused = b.id === focusedId;
+    const suggestions = isFocused ? getSuggestionsFor(b) : [];
+    const typeStyle = dualMode ? { width: "100%", marginLeft: "0" } : TYPE_STYLE[b.type];
+    return (
+      <div key={b.id} style={{ position: "relative" }}>
+        <textarea
+          ref={(el) => (textRefs.current[b.id] = el)}
+          value={b.text}
+          placeholder={PLACEHOLDER[b.type]}
+          onFocus={() => {
+            setFocusedId(b.id);
+            setSuggestIndex(-1);
+          }}
+          onSelect={(e) => handleSelect(e, b)}
+          onContextMenu={(e) => handleContextMenu(e, b)}
+          onChange={(e) => {
+            updateText(b.id, e.target.value);
+            setSuggestIndex(-1);
+            resize(e.target);
+          }}
+          onKeyDown={(e) => handleKeyDown(e, b.id)}
+          rows={1}
+          spellCheck={b.type === "action" || b.type === "dialogue"}
+          style={{
+            ...styles.line,
+            ...typeStyle,
+            fontWeight: b.type === "character" || b.type === "scene_heading" ? 700 : 400,
+          }}
+        />
+        {suggestions.length > 0 && (
+          <div style={{ ...styles.suggestDropdown, marginLeft: typeStyle.marginLeft, width: typeStyle.width }}>
+            {suggestions.map((s, i) => (
+              <div
+                key={s + i}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  updateText(b.id, s);
+                  setSuggestIndex(-1);
+                  setTimeout(() => textRefs.current[b.id]?.focus(), 0);
+                }}
+                style={{ ...styles.suggestItem, ...(i === suggestIndex ? styles.suggestItemActive : {}) }}
+              >
+                {s}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div style={styles.app}>
@@ -494,6 +830,7 @@ export default function ScreenplayEditor() {
           <button style={styles.btn} onClick={() => setShowElementsPanel(true)}>
             Elements{elements.length > 0 ? ` (${elements.length})` : ""}
           </button>
+          <button style={styles.btn} onClick={() => setShowScriptReport(true)}>Report</button>
           <button style={styles.btnPrimary} onClick={handleSave}>Save .fountain</button>
         </div>
       </div>
@@ -547,6 +884,17 @@ export default function ScreenplayEditor() {
                   </button>
                 );
               })}
+              <div style={{ ...styles.railLabel, marginTop: "14px" }}>Dual Dialogue</div>
+              <button
+                onClick={() => toggleDual(focusedId)}
+                style={{
+                  ...styles.railBtn,
+                  fontSize: "11px",
+                  ...(blocks.find((b) => b.id === focusedId)?.dual ? styles.railBtnActive : {}),
+                }}
+              >
+                {blocks.find((b) => b.id === focusedId)?.dual ? "✓ Simultaneous (^)" : "Mark Simultaneous (^)"}
+              </button>
             </>
           )}
 
@@ -579,29 +927,29 @@ export default function ScreenplayEditor() {
         {/* Page */}
         <div style={styles.pageWrap}>
           <div style={styles.page} className="print-page">
-            {blocks.map((b) => (
-              <textarea
-                key={b.id}
-                ref={(el) => (textRefs.current[b.id] = el)}
-                value={b.text}
-                placeholder={PLACEHOLDER[b.type]}
-                onFocus={() => setFocusedId(b.id)}
-                onSelect={(e) => handleSelect(e, b)}
-                onContextMenu={(e) => handleContextMenu(e, b)}
-                onChange={(e) => {
-                  updateText(b.id, e.target.value);
-                  resize(e.target);
-                }}
-                onKeyDown={(e) => handleKeyDown(e, b.id)}
-                rows={1}
-                spellCheck={b.type === "action" || b.type === "dialogue"}
-                style={{
-                  ...styles.line,
-                  ...TYPE_STYLE[b.type],
-                  fontWeight: b.type === "character" || b.type === "scene_heading" ? 700 : 400,
-                }}
-              />
-            ))}
+            {buildPageGroups(blocks).map((g) => {
+              if (g.kind === "single") return renderField(g.block);
+              if (g.kind === "cue") {
+                return (
+                  <React.Fragment key={g.character.id}>
+                    {renderField(g.character)}
+                    {g.body.map((bl) => renderField(bl))}
+                  </React.Fragment>
+                );
+              }
+              return (
+                <div key={g.left.character.id} style={styles.dualRow}>
+                  <div style={styles.dualCol}>
+                    {renderField(g.left.character, true)}
+                    {g.left.body.map((bl) => renderField(bl, true))}
+                  </div>
+                  <div style={styles.dualCol}>
+                    {renderField(g.right.character, true)}
+                    {g.right.body.map((bl) => renderField(bl, true))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -609,7 +957,10 @@ export default function ScreenplayEditor() {
       {/* Status bar */}
       <div style={styles.statusBar} className="no-print">
         <span style={styles.statusPill}>{LABELS[focusedType]}</span>
-        <span style={styles.statusText}>{wordCount} words · ~{pageEstimate} page{pageEstimate === 1 ? "" : "s"}</span>
+        <span style={styles.statusText}>
+          {wordCount} words · ~{pageEstimate} page{pageEstimate === 1 ? "" : "s"}
+          {lastSaved ? ` · Saved ${new Date(lastSaved).toLocaleTimeString()}` : ""}
+        </span>
       </div>
 
       {/* Right-click mark menu */}
@@ -668,6 +1019,42 @@ export default function ScreenplayEditor() {
                 </div>
               );
             })}
+          </div>
+        </>
+      )}
+
+      {/* Script Report panel */}
+      {showScriptReport && (
+        <>
+          <div style={styles.overlay} className="no-print" onClick={() => setShowScriptReport(false)} />
+          <div style={styles.panel} className="no-print">
+            <div style={styles.panelHeader}>
+              <span style={styles.brandText}>SCRIPT REPORT</span>
+              <button style={styles.btn} onClick={() => setShowScriptReport(false)}>Close</button>
+            </div>
+            <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportScriptReport}>
+              Export Report
+            </button>
+            <div style={{ fontSize: "12px", color: MUTE, marginBottom: "14px" }}>
+              {scenes.length} scene{scenes.length === 1 ? "" : "s"} · {new Set(scenes.flatMap((s) => s.characters)).size} character
+              {new Set(scenes.flatMap((s) => s.characters)).size === 1 ? "" : "s"}
+            </div>
+            {scenes.map((s, i) => (
+              <div key={i} style={styles.sceneCard}>
+                <div style={{ fontWeight: 700, fontSize: "12.5px" }}>{i + 1}. {s.heading}</div>
+                <div style={{ fontSize: "11.5px", color: MUTE, marginTop: "4px" }}>
+                  {s.characters.length ? s.characters.join(", ") : "No characters"} · ~{s.pages}p
+                </div>
+              </div>
+            ))}
+            {nameWarnings.length > 0 && (
+              <div style={{ marginTop: "18px" }}>
+                <div style={styles.railLabel}>Possible Name Inconsistencies</div>
+                {nameWarnings.map(([a, b], i) => (
+                  <div key={i} style={styles.warningRow}>"{a}" vs "{b}"</div>
+                ))}
+              </div>
+            )}
           </div>
         </>
       )}
@@ -893,6 +1280,38 @@ const styles = {
     fontSize: "15px",
     lineHeight: 1,
     padding: "0 4px",
+  },
+  dualRow: { display: "flex", gap: "0.3in", width: "100%" },
+  dualCol: { flex: 1, minWidth: 0 },
+  suggestDropdown: {
+    position: "absolute",
+    zIndex: 30,
+    background: INK,
+    border: `1px solid ${GOLD}`,
+    borderRadius: "3px",
+    marginTop: "2px",
+    overflow: "hidden",
+    boxShadow: "0 6px 16px rgba(0,0,0,0.4)",
+  },
+  suggestItem: {
+    padding: "6px 10px",
+    fontSize: "11.5px",
+    fontFamily: "'Courier New', Courier, monospace",
+    color: PAPER,
+    cursor: "pointer",
+  },
+  suggestItemActive: { background: GOLD, color: INK },
+  sceneCard: {
+    padding: "8px",
+    border: `1px solid ${LINE}`,
+    borderRadius: "3px",
+    marginBottom: "8px",
+  },
+  warningRow: {
+    fontSize: "12px",
+    color: GOLD,
+    padding: "4px 0",
+    borderBottom: `1px solid ${LINE}`,
   },
 };
 
