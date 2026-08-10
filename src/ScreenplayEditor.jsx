@@ -200,6 +200,29 @@ function generateElementsReport(elements, title) {
   return out.join("\n");
 }
 
+function parseElementsReport(raw) {
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
+  const labelToCat = Object.fromEntries(Object.entries(CATEGORIES).map(([k, v]) => [v, k]));
+  const elements = [];
+  let currentCat = null;
+  for (const line of lines) {
+    const headerMatch = line.match(/^##\s+(.+)$/);
+    if (headerMatch) {
+      currentCat = labelToCat[headerMatch[1].trim()] || null;
+      continue;
+    }
+    const itemMatch = line.match(/^-\s+(.+?)\s+\((\d+)\s+mentions?\)/);
+    if (itemMatch && currentCat) {
+      const text = itemMatch[1].trim();
+      const count = parseInt(itemMatch[2], 10) || 1;
+      for (let i = 0; i < count; i++) {
+        elements.push({ id: newId(), category: currentCat, text });
+      }
+    }
+  }
+  return elements;
+}
+
 /* ---------------------------------------------------------------
    Component
 --------------------------------------------------------------- */
@@ -215,6 +238,7 @@ export default function ScreenplayEditor() {
   const [contextMenu, setContextMenu] = useState(null);
   const [showElementsPanel, setShowElementsPanel] = useState(false);
   const fileInputRef = useRef(null);
+  const elementsFileInputRef = useRef(null);
   const textRefs = useRef({});
 
   const resize = (el) => {
@@ -414,6 +438,23 @@ export default function ScreenplayEditor() {
     e.target.value = "";
   };
 
+  const handleLoadElementsClick = () => elementsFileInputRef.current?.click();
+
+  const handleElementsFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (elements.length > 0 && !window.confirm("Replace currently tracked elements with this file?")) {
+      e.target.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setElements(parseElementsReport(String(reader.result)));
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
   const wordCount = blocks.reduce((sum, b) => sum + (b.text.trim() ? b.text.trim().split(/\s+/).length : 0), 0);
   const pageEstimate = Math.max(1, Math.round(wordCount / 230));
 
@@ -598,9 +639,19 @@ export default function ScreenplayEditor() {
               <span style={styles.brandText}>ELEMENTS</span>
               <button style={styles.btn} onClick={() => setShowElementsPanel(false)}>Close</button>
             </div>
-            <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportElements}>
+            <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "8px" }} onClick={handleExportElements}>
               Export Report
             </button>
+            <button style={{ ...styles.btn, width: "100%", marginBottom: "16px" }} onClick={handleLoadElementsClick}>
+              Load Report
+            </button>
+            <input
+              ref={elementsFileInputRef}
+              type="file"
+              accept=".md,.txt"
+              style={{ display: "none" }}
+              onChange={handleElementsFile}
+            />
             {elements.length === 0 && <div style={{ color: MUTE, fontSize: "13px" }}>Nothing marked yet. Select text in an Action line to tag a character, prop, or sound cue.</div>}
             {Object.entries(CATEGORIES).map(([cat, label]) => {
               const items = elements.filter((e) => e.category === cat);
