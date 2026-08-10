@@ -1178,6 +1178,11 @@ const THEMES = [
   { id: "crimson", name: "Crimson Draft", ink: "#241012", paper: "#fbf5f4", text: "#f3e3e1", gold: "#c8555f" },
   { id: "forest", name: "Forest", ink: "#0f1f17", paper: "#f6faf6", text: "#e3eee4", gold: "#82b384" },
   { id: "studio", name: "Light Studio", ink: "#f2efe7", paper: "#ffffff", text: "#2a251d", gold: "#b5651d" },
+  { id: "paperwhite", name: "Paper White", ink: "#ffffff", paper: "#fdfdfd", text: "#232323", gold: "#3b6ea5" },
+  { id: "sepia", name: "Sepia", ink: "#f4ecd8", paper: "#fffdf6", text: "#3b2f1e", gold: "#8a6d3b" },
+  { id: "slate", name: "Slate Light", ink: "#eef1f4", paper: "#ffffff", text: "#1f2937", gold: "#2f6fed" },
+  { id: "rosequartz", name: "Rose Quartz", ink: "#faf0f2", paper: "#fffbfc", text: "#3a2027", gold: "#c0607a" },
+  { id: "mint", name: "Mint", ink: "#eefaf3", paper: "#ffffff", text: "#123324", gold: "#2f9e6a" },
 ];
 
 const DEFAULT_THEME = THEMES[0];
