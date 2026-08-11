@@ -1323,18 +1323,25 @@ export default function ScreenplayEditor() {
         /* Page */
         <div style={styles.pageWrap}>
           <div style={styles.page} className="print-page">
-            {buildPageGroups(blocks).map((g) => {
-              if (g.kind === "single") return renderField(g.block);
+            {buildPageGroups(blocks).map((g, idx) => {
+              const gap = idx === 0 ? 0 : "12pt";
+              if (g.kind === "single") {
+                return (
+                  <div key={g.block.id} style={{ paddingTop: gap }}>
+                    {renderField(g.block)}
+                  </div>
+                );
+              }
               if (g.kind === "cue") {
                 return (
-                  <React.Fragment key={g.character.id}>
+                  <div key={g.character.id} style={{ paddingTop: gap }}>
                     {renderField(g.character)}
                     {g.body.map((bl) => renderField(bl))}
-                  </React.Fragment>
+                  </div>
                 );
               }
               return (
-                <div key={g.left.character.id} style={styles.dualRow}>
+                <div key={g.left.character.id} style={{ ...styles.dualRow, paddingTop: gap }}>
                   <div style={styles.dualCol}>
                     {renderField(g.left.character, true)}
                     {g.left.body.map((bl) => renderField(bl, true))}
@@ -1969,7 +1976,7 @@ function buildGlobalCss(t) {
   @import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&display=swap');
   * { box-sizing: border-box; }
   textarea::placeholder { color: #b9b3a0; }
-  textarea:focus { background: rgba(0,0,0,0.03); }
+  textarea:focus { background: rgba(0,0,0,0.035); box-shadow: inset 3px 0 0 ${t.gold}; }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track { background: ${t.ink}; }
   ::-webkit-scrollbar-thumb { background: ${line}; border-radius: 5px; }
