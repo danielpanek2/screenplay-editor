@@ -1,0 +1,12 @@
+{
+  "name": "screenplay-editor",
+  "compatibility_date": "2026-08-01",
+  "main": "worker/index.js",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "kv_namespaces": [
+    { "binding": "SCRIPTS_KV", "id": "2b7020b7970b40498a2aaf7ebdbc9f11" }
+  ]
+}

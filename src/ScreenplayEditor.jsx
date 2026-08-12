@@ -52,14 +52,42 @@ let idCounter = 1;
 const newId = () => `b${idCounter++}`;
 
 /* ---------------------------------------------------------------
-   Storage layer — currently browser localStorage. Kept behind an
-   async interface so swapping in a cloud backend later (Cloudflare
-   KV, etc.) only means changing what's inside these two functions,
-   not how the rest of the app calls them.
+   Storage layer — cloud-first (via the Worker API + KV, gated by
+   the app password) with a localStorage fallback/cache so the app
+   still works offline or before the backend is set up.
 --------------------------------------------------------------- */
 const STORAGE_KEY = "slugline_screenplay_v1";
+const AUTH_STORAGE_KEY = "slugline_auth_v1";
 
-async function saveScriptData(data) {
+async function verifyPassword(password) {
+  try {
+    const res = await fetch("/api/login", { method: "POST", headers: { "X-App-Password": password } });
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function saveScriptData(data, password) {
+  if (password) {
+    try {
+      const res = await fetch("/api/script", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "X-App-Password": password },
+        body: JSON.stringify(data),
+      });
+      if (res.ok) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        } catch (e) {
+          // ignore — cloud save already succeeded
+        }
+        return true;
+      }
+    } catch (e) {
+      // network error — fall through to local-only save
+    }
+  }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     return true;
@@ -69,7 +97,20 @@ async function saveScriptData(data) {
   }
 }
 
-async function loadScriptData() {
+async function loadScriptData(password) {
+  if (password) {
+    try {
+      const res = await fetch("/api/script", { headers: { "X-App-Password": password } });
+      if (res.status === 401) return { __unauthorized: true };
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text !== "null") return JSON.parse(text);
+        return null;
+      }
+    } catch (e) {
+      // network error — fall through to local cache
+    }
+  }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
@@ -583,6 +624,12 @@ export default function ScreenplayEditor() {
   const [openMenu, setOpenMenu] = useState(null);
   const [showSceneNumbers, setShowSceneNumbers] = useState(false);
   const [outlineMode, setOutlineMode] = useState(false);
+  const [authed, setAuthed] = useState(false);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [appPassword, setAppPassword] = useState(null);
+  const [passwordInput, setPasswordInput] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
   const fileInputRef = useRef(null);
   const elementsFileInputRef = useRef(null);
   const textRefs = useRef({});
@@ -639,11 +686,87 @@ export default function ScreenplayEditor() {
     }
   }, [showSceneNumbers]);
 
-  // Load any autosaved script on first mount.
+  // Check for a remembered password on first mount.
   useEffect(() => {
     let cancelled = false;
-    loadScriptData().then((data) => {
-      if (cancelled || !data) {
+    let stored = null;
+    try {
+      stored = localStorage.getItem(AUTH_STORAGE_KEY);
+    } catch (e) {
+      // ignore
+    }
+    if (!stored) {
+      setAuthChecking(false);
+      return;
+    }
+    verifyPassword(stored).then((ok) => {
+      if (cancelled) return;
+      if (ok) {
+        setAppPassword(stored);
+        setAuthed(true);
+      } else {
+        try {
+          localStorage.removeItem(AUTH_STORAGE_KEY);
+        } catch (e) {
+          // ignore
+        }
+      }
+      setAuthChecking(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    if (!passwordInput) return;
+    setAuthBusy(true);
+    setAuthError("");
+    const ok = await verifyPassword(passwordInput);
+    setAuthBusy(false);
+    if (ok) {
+      try {
+        localStorage.setItem(AUTH_STORAGE_KEY, passwordInput);
+      } catch (e) {
+        // ignore
+      }
+      setAppPassword(passwordInput);
+      setAuthed(true);
+      setPasswordInput("");
+    } else {
+      setAuthError("Incorrect password, or the cloud backend isn't set up yet.");
+    }
+  };
+
+  const handleContinueOffline = () => {
+    setAppPassword(null);
+    setAuthed(true);
+  };
+
+  const handleLogout = () => {
+    try {
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+    } catch (e) {
+      // ignore
+    }
+    setAppPassword(null);
+    setAuthed(false);
+    setLoaded(false);
+  };
+
+  // Load the script once authenticated (or once "continue offline" is chosen).
+  useEffect(() => {
+    if (!authed) return;
+    let cancelled = false;
+    loadScriptData(appPassword).then((data) => {
+      if (cancelled) return;
+      if (data && data.__unauthorized) {
+        handleLogout();
+        setAuthError("Your session is no longer valid — please log in again.");
+        return;
+      }
+      if (!data) {
         setLoaded(true);
         return;
       }
@@ -661,20 +784,20 @@ export default function ScreenplayEditor() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authed]);
 
   // Debounced autosave whenever the script changes.
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !authed) return;
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(() => {
       const savedAt = new Date().toISOString();
-      saveScriptData({ title, author, blocks, elements, savedAt }).then((ok) => {
+      saveScriptData({ title, author, blocks, elements, savedAt }, appPassword).then((ok) => {
         if (ok) setLastSaved(savedAt);
       });
     }, 800);
     return () => clearTimeout(autosaveTimer.current);
-  }, [blocks, title, author, elements, loaded]);
+  }, [blocks, title, author, elements, loaded, authed, appPassword]);
 
   useEffect(() => {
     if (!pendingFocus) return;
@@ -979,7 +1102,7 @@ export default function ScreenplayEditor() {
     setAuthor("");
     setElements([]);
     setPendingFocus({ id, pos: "start" });
-    saveScriptData({ title: "Untitled Screenplay", author: "", blocks: blank, elements: [], savedAt: new Date().toISOString() });
+    saveScriptData({ title: "Untitled Screenplay", author: "", blocks: blank, elements: [], savedAt: new Date().toISOString() }, appPassword);
   };
 
   const handleSave = () => {
@@ -1015,7 +1138,7 @@ export default function ScreenplayEditor() {
       setAuthor(a || "");
       setBlocks(b);
       setPendingFocus({ id: b[0].id, pos: "start" });
-      saveScriptData({ title: newTitle, author: a || "", blocks: b, elements, savedAt: new Date().toISOString() });
+      saveScriptData({ title: newTitle, author: a || "", blocks: b, elements, savedAt: new Date().toISOString() }, appPassword);
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -1142,6 +1265,37 @@ export default function ScreenplayEditor() {
     <div style={styles.app}>
       <style>{globalCss}</style>
 
+      {authChecking ? (
+        <div style={styles.authWrap}>
+          <span style={styles.brandMark}>⟡</span>
+        </div>
+      ) : !authed ? (
+        <div style={styles.authWrap}>
+          <form style={styles.authCard} onSubmit={handleLogin}>
+            <div style={styles.brand}>
+              <span style={styles.brandMark}>⟡</span>
+              <span style={styles.brandText}>SLUGLINE</span>
+            </div>
+            <p style={styles.authHint}>Enter the password to sync your script to the cloud.</p>
+            <input
+              type="password"
+              autoFocus
+              value={passwordInput}
+              onChange={(e) => setPasswordInput(e.target.value)}
+              placeholder="Password"
+              style={styles.authInput}
+            />
+            {authError && <div style={styles.authError}>{authError}</div>}
+            <button type="submit" style={styles.btnPrimary} disabled={authBusy}>
+              {authBusy ? "Checking…" : "Log In"}
+            </button>
+            <button type="button" style={styles.authSkip} onClick={handleContinueOffline}>
+              Continue without cloud sync
+            </button>
+          </form>
+        </div>
+      ) : (
+      <>
       {/* Header */}
       <div style={styles.header} className="no-print">
         <div style={styles.brand}>
@@ -1173,6 +1327,8 @@ export default function ScreenplayEditor() {
             { label: "Export PDF", onClick: handleExportPDF },
             { divider: true },
             { label: "Print", onClick: () => window.print() },
+            { divider: true },
+            { label: appPassword ? "Log Out" : "Log In…", onClick: appPassword ? handleLogout : () => setAuthed(false) },
           ])}
           {renderMenu("view", "View", [
             { label: "Appearance / Theme…", onClick: () => setShowAppearance(true) },
@@ -1370,6 +1526,7 @@ export default function ScreenplayEditor() {
             ? `${sceneUnits.filter((u) => u.headingId !== null).length} scenes · drag cards to reorder`
             : `${wordCount} words · ~${pageEstimate} page${pageEstimate === 1 ? "" : "s"}`}
           {lastSaved ? ` · Saved ${new Date(lastSaved).toLocaleTimeString()}` : ""}
+          {authed ? (appPassword ? " · Cloud sync on" : " · Local only") : ""}
         </span>
       </div>
 
@@ -1564,6 +1721,8 @@ export default function ScreenplayEditor() {
             </button>
           </div>
         </>
+      )}
+      </>
       )}
     </div>
   );
@@ -1966,6 +2125,44 @@ function buildStyles(t) {
       fontSize: "12pt",
       lineHeight: 1,
       color: "#1a1a1a",
+    },
+    authWrap: {
+      flex: 1,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      height: "100vh",
+    },
+    authCard: {
+      width: "300px",
+      maxWidth: "90vw",
+      display: "flex",
+      flexDirection: "column",
+      gap: "10px",
+      background: mix(t.ink, t.text, 0.06),
+      border: `1px solid ${line}`,
+      borderRadius: "6px",
+      padding: "28px 24px",
+    },
+    authHint: { fontSize: "12.5px", color: mute, margin: "4px 0 6px" },
+    authInput: {
+      background: "transparent",
+      border: `1px solid ${line}`,
+      borderRadius: "3px",
+      color: t.text,
+      padding: "9px 10px",
+      fontSize: "13px",
+      outline: "none",
+    },
+    authError: { fontSize: "12px", color: "#e08080" },
+    authSkip: {
+      background: "transparent",
+      border: "none",
+      color: mute,
+      fontSize: "11.5px",
+      textDecoration: "underline",
+      cursor: "pointer",
+      padding: "4px 0",
     },
   };
 }
