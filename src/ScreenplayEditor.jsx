@@ -52,42 +52,13 @@ let idCounter = 1;
 const newId = () => `b${idCounter++}`;
 
 /* ---------------------------------------------------------------
-   Storage layer — cloud-first (via the Worker API + KV, gated by
-   the app password) with a localStorage fallback/cache so the app
-   still works offline or before the backend is set up.
+   Local storage — used only in "continue without cloud sync" mode:
+   a single local autosave slot, no multi-script support offline.
 --------------------------------------------------------------- */
 const STORAGE_KEY = "slugline_screenplay_v1";
 const AUTH_STORAGE_KEY = "slugline_auth_v1";
 
-async function verifyPassword(password) {
-  try {
-    const res = await fetch("/api/login", { method: "POST", headers: { "X-App-Password": password } });
-    return res.ok;
-  } catch (e) {
-    return false;
-  }
-}
-
-async function saveScriptData(data, password) {
-  if (password) {
-    try {
-      const res = await fetch("/api/script", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "X-App-Password": password },
-        body: JSON.stringify(data),
-      });
-      if (res.ok) {
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-        } catch (e) {
-          // ignore — cloud save already succeeded
-        }
-        return true;
-      }
-    } catch (e) {
-      // network error — fall through to local-only save
-    }
-  }
+async function saveScriptData(data) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     return true;
@@ -97,26 +68,80 @@ async function saveScriptData(data, password) {
   }
 }
 
-async function loadScriptData(password) {
-  if (password) {
-    try {
-      const res = await fetch("/api/script", { headers: { "X-App-Password": password } });
-      if (res.status === 401) return { __unauthorized: true };
-      if (res.ok) {
-        const text = await res.text();
-        if (text && text !== "null") return JSON.parse(text);
-        return null;
-      }
-    } catch (e) {
-      // network error — fall through to local cache
-    }
-  }
+async function loadScriptData() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch (e) {
     console.error("Autosave load failed", e);
     return null;
+  }
+}
+
+/* ---------------------------------------------------------------
+   Cloud storage — a small library of named scripts via the Worker +
+   KV API, gated by the app password. Each script has its own id.
+--------------------------------------------------------------- */
+async function verifyPassword(password) {
+  try {
+    const res = await fetch("/api/login", { method: "POST", headers: { "X-App-Password": password } });
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function fetchScriptList(password) {
+  try {
+    const res = await fetch("/api/scripts", { headers: { "X-App-Password": password } });
+    if (res.status === 401) return { unauthorized: true };
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.scripts || [];
+  } catch (e) {
+    return null;
+  }
+}
+
+async function createCloudScript(password) {
+  try {
+    const res = await fetch("/api/scripts", { method: "POST", headers: { "X-App-Password": password } });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function loadCloudScript(password, id) {
+  try {
+    const res = await fetch(`/api/scripts/${id}`, { headers: { "X-App-Password": password } });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function saveCloudScript(password, id, data) {
+  try {
+    const res = await fetch(`/api/scripts/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-App-Password": password },
+      body: JSON.stringify(data),
+    });
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function deleteCloudScript(password, id) {
+  try {
+    const res = await fetch(`/api/scripts/${id}`, { method: "DELETE", headers: { "X-App-Password": password } });
+    return res.ok;
+  } catch (e) {
+    return false;
   }
 }
 
@@ -630,6 +655,11 @@ export default function ScreenplayEditor() {
   const [passwordInput, setPasswordInput] = useState("");
   const [authError, setAuthError] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+  const [currentScriptId, setCurrentScriptId] = useState(null);
+  const [showPicker, setShowPicker] = useState(false);
+  const [scriptList, setScriptList] = useState([]);
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerError, setPickerError] = useState("");
   const fileInputRef = useRef(null);
   const elementsFileInputRef = useRef(null);
   const textRefs = useRef({});
@@ -753,19 +783,81 @@ export default function ScreenplayEditor() {
     setAppPassword(null);
     setAuthed(false);
     setLoaded(false);
+    setCurrentScriptId(null);
+    setShowPicker(false);
+    setScriptList([]);
   };
 
-  // Load the script once authenticated (or once "continue offline" is chosen).
+  // Populate the editor from a full script record (from open or create).
+  const openScriptData = (data, id) => {
+    bumpIdCounter([...(data.blocks || []), ...(data.elements || [])]);
+    const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
+    setTitle(data.title || "Untitled Screenplay");
+    setAuthor(data.author || "");
+    setBlocks(restoredBlocks);
+    setElements(data.elements || []);
+    setFocusedId(restoredBlocks[0].id);
+    setLastSaved(data.savedAt || null);
+    setCurrentScriptId(id);
+    setShowPicker(false);
+    setLoaded(true);
+  };
+
+  // Immediately push any pending changes, bypassing the debounce —
+  // used before navigating away from the currently open script.
+  const flushSave = () => {
+    if (!loaded || !authed || !appPassword || !currentScriptId) return;
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    const savedAt = new Date().toISOString();
+    saveCloudScript(appPassword, currentScriptId, { title, author, blocks, elements, savedAt }).then((ok) => {
+      if (ok) setLastSaved(savedAt);
+    });
+  };
+
+  const handleOpenScript = async (id) => {
+    setPickerLoading(true);
+    setPickerError("");
+    const data = await loadCloudScript(appPassword, id);
+    setPickerLoading(false);
+    if (data) openScriptData(data, id);
+    else setPickerError("Couldn't open that script.");
+  };
+
+  const handleNewCloudScript = async () => {
+    setPickerLoading(true);
+    setPickerError("");
+    const created = await createCloudScript(appPassword);
+    setPickerLoading(false);
+    if (created) {
+      openScriptData(created, created.id);
+      setScriptList((prev) => [{ id: created.id, title: created.title, updatedAt: created.savedAt }, ...prev]);
+    } else {
+      setPickerError("Couldn't create a new script.");
+    }
+  };
+
+  const handleDeleteScript = async (id, e) => {
+    e.stopPropagation();
+    if (!window.confirm("Delete this script? This can't be undone.")) return;
+    const ok = await deleteCloudScript(appPassword, id);
+    if (ok) {
+      setScriptList((prev) => prev.filter((s) => s.id !== id));
+      if (currentScriptId === id) setCurrentScriptId(null);
+    }
+  };
+
+  // After login: cloud mode shows the script picker; offline mode
+  // restores the single local autosave slot as before.
   useEffect(() => {
     if (!authed) return;
+    if (appPassword) {
+      setShowPicker(true);
+      setLoaded(true);
+      return;
+    }
     let cancelled = false;
-    loadScriptData(appPassword).then((data) => {
+    loadScriptData().then((data) => {
       if (cancelled) return;
-      if (data && data.__unauthorized) {
-        handleLogout();
-        setAuthError("Your session is no longer valid — please log in again.");
-        return;
-      }
       if (!data) {
         setLoaded(true);
         return;
@@ -783,21 +875,53 @@ export default function ScreenplayEditor() {
     return () => {
       cancelled = true;
     };
+  }, [authed, appPassword]);
+
+  // Fetch the script list whenever the picker is opened in cloud mode.
+  useEffect(() => {
+    if (!showPicker || !appPassword) return;
+    let cancelled = false;
+    setPickerLoading(true);
+    setPickerError("");
+    fetchScriptList(appPassword).then((list) => {
+      if (cancelled) return;
+      setPickerLoading(false);
+      if (list && list.unauthorized) {
+        handleLogout();
+        setAuthError("Your session is no longer valid — please log in again.");
+        return;
+      }
+      if (list) setScriptList(list);
+      else setPickerError("Couldn't load your scripts.");
+    });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed]);
+  }, [showPicker, appPassword]);
 
   // Debounced autosave whenever the script changes.
   useEffect(() => {
     if (!loaded || !authed) return;
+    if (appPassword && !currentScriptId) return; // cloud mode, nothing open yet
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(() => {
       const savedAt = new Date().toISOString();
-      saveScriptData({ title, author, blocks, elements, savedAt }, appPassword).then((ok) => {
-        if (ok) setLastSaved(savedAt);
-      });
+      if (appPassword && currentScriptId) {
+        saveCloudScript(appPassword, currentScriptId, { title, author, blocks, elements, savedAt }).then((ok) => {
+          if (ok) {
+            setLastSaved(savedAt);
+            setScriptList((prev) => prev.map((s) => (s.id === currentScriptId ? { ...s, title, updatedAt: savedAt } : s)));
+          }
+        });
+      } else {
+        saveScriptData({ title, author, blocks, elements, savedAt }).then((ok) => {
+          if (ok) setLastSaved(savedAt);
+        });
+      }
     }, 800);
     return () => clearTimeout(autosaveTimer.current);
-  }, [blocks, title, author, elements, loaded, authed, appPassword]);
+  }, [blocks, title, author, elements, loaded, authed, appPassword, currentScriptId]);
 
   useEffect(() => {
     if (!pendingFocus) return;
@@ -1094,6 +1218,11 @@ export default function ScreenplayEditor() {
   };
 
   const handleNew = () => {
+    if (appPassword) {
+      flushSave();
+      handleNewCloudScript();
+      return;
+    }
     if (!window.confirm("Start a new script? Unsaved changes will be lost.")) return;
     const id = newId();
     const blank = [{ id, type: "scene_heading", text: "" }];
@@ -1102,7 +1231,7 @@ export default function ScreenplayEditor() {
     setAuthor("");
     setElements([]);
     setPendingFocus({ id, pos: "start" });
-    saveScriptData({ title: "Untitled Screenplay", author: "", blocks: blank, elements: [], savedAt: new Date().toISOString() }, appPassword);
+    saveScriptData({ title: "Untitled Screenplay", author: "", blocks: blank, elements: [], savedAt: new Date().toISOString() });
   };
 
   const handleSave = () => {
@@ -1138,7 +1267,14 @@ export default function ScreenplayEditor() {
       setAuthor(a || "");
       setBlocks(b);
       setPendingFocus({ id: b[0].id, pos: "start" });
-      saveScriptData({ title: newTitle, author: a || "", blocks: b, elements, savedAt: new Date().toISOString() }, appPassword);
+      const savedAt = new Date().toISOString();
+      if (appPassword && currentScriptId) {
+        saveCloudScript(appPassword, currentScriptId, { title: newTitle, author: a || "", blocks: b, elements, savedAt }).then((ok) => {
+          if (ok) setLastSaved(savedAt);
+        });
+      } else {
+        saveScriptData({ title: newTitle, author: a || "", blocks: b, elements, savedAt });
+      }
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -1294,6 +1430,41 @@ export default function ScreenplayEditor() {
             </button>
           </form>
         </div>
+      ) : showPicker ? (
+        <div style={styles.authWrap}>
+          <div style={styles.pickerCard}>
+            <div style={styles.panelHeader}>
+              <span style={styles.brandText}>YOUR SCRIPTS</span>
+              <div style={{ display: "flex", gap: "8px" }}>
+                {currentScriptId && (
+                  <button style={styles.btn} onClick={() => setShowPicker(false)}>Back</button>
+                )}
+                <button style={styles.btn} onClick={handleLogout}>Log Out</button>
+              </div>
+            </div>
+            <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "14px" }} onClick={handleNewCloudScript} disabled={pickerLoading}>
+              + New Script
+            </button>
+            {pickerError && <div style={styles.authError}>{pickerError}</div>}
+            {pickerLoading && scriptList.length === 0 && <div style={{ color: mutedColor, fontSize: "13px" }}>Loading…</div>}
+            {!pickerLoading && scriptList.length === 0 && !pickerError && (
+              <div style={{ color: mutedColor, fontSize: "13px" }}>No scripts yet — create your first one above.</div>
+            )}
+            <div style={{ maxHeight: "50vh", overflowY: "auto" }}>
+              {scriptList.map((s) => (
+                <div key={s.id} onClick={() => handleOpenScript(s.id)} style={styles.scriptRow}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: "13px" }}>{s.title || "Untitled Screenplay"}</div>
+                    <div style={{ fontSize: "11px", color: mutedColor }}>
+                      {s.updatedAt ? new Date(s.updatedAt).toLocaleString() : ""}
+                    </div>
+                  </div>
+                  <button style={styles.elementRemove} onClick={(e) => handleDeleteScript(s.id, e)} title="Delete">×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       ) : (
       <>
       {/* Header */}
@@ -1322,6 +1493,7 @@ export default function ScreenplayEditor() {
           {renderMenu("file", "File", [
             { label: "New", onClick: handleNew },
             { label: "Load Script…", onClick: handleLoadClick },
+            ...(appPassword ? [{ label: "My Scripts…", onClick: () => { flushSave(); setShowPicker(true); } }] : []),
             { divider: true },
             { label: "Save .fountain", onClick: handleSave },
             { label: "Export PDF", onClick: handleExportPDF },
@@ -2163,6 +2335,22 @@ function buildStyles(t) {
       textDecoration: "underline",
       cursor: "pointer",
       padding: "4px 0",
+    },
+    pickerCard: {
+      width: "380px",
+      maxWidth: "92vw",
+      background: mix(t.ink, t.text, 0.06),
+      border: `1px solid ${line}`,
+      borderRadius: "6px",
+      padding: "22px",
+    },
+    scriptRow: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "10px 8px",
+      borderBottom: `1px solid ${line}`,
+      cursor: "pointer",
     },
   };
 }
