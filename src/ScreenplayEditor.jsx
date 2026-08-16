@@ -486,6 +486,108 @@ function generateDialogueStatsText(stats, title) {
 }
 
 /* ---------------------------------------------------------------
+   Breakdown report — locations, day/night, interior/exterior, and
+   character scene-counts (distinct from dialogue word-counts).
+--------------------------------------------------------------- */
+function parseSceneHeadingParts(heading) {
+  const parts = heading.split(" - ");
+  const timeOfDay = parts.length > 1 ? parts[parts.length - 1].trim().toUpperCase() : "";
+  const rest = parts.length > 1 ? parts.slice(0, -1).join(" - ") : heading;
+  const m = rest.match(/^(INT\.\/EXT\.|I\/E\.|INT\.|EXT\.|EST\.)\s*(.*)$/i);
+  const intExt = m ? m[1].toUpperCase() : "";
+  const location = m ? m[2].trim() : rest.trim();
+  return { intExt, location, timeOfDay };
+}
+
+function normalizeIntExt(raw) {
+  const r = raw.toUpperCase();
+  if (r.startsWith("INT") && r.includes("EXT")) return "INT/EXT";
+  if (r.startsWith("I/E")) return "INT/EXT";
+  if (r.startsWith("EXT")) return "EXT";
+  if (r.startsWith("INT") || r.startsWith("EST")) return "INT";
+  return "(unspecified)";
+}
+
+function normalizeTimeOfDay(raw) {
+  if (!raw) return "(unspecified)";
+  if (raw.includes("DAY")) return "DAY";
+  if (raw.includes("NIGHT")) return "NIGHT";
+  return raw;
+}
+
+function computeBreakdown(scenes) {
+  const locations = {};
+  const dayNight = {};
+  const intExt = {};
+  const characterScenes = {};
+
+  scenes.forEach((s) => {
+    const { intExt: ie, location, timeOfDay } = parseSceneHeadingParts(s.heading);
+    const locKey = location || "(unspecified)";
+    locations[locKey] = (locations[locKey] || 0) + 1;
+
+    const todKey = normalizeTimeOfDay(timeOfDay);
+    dayNight[todKey] = (dayNight[todKey] || 0) + 1;
+
+    const ieKey = normalizeIntExt(ie);
+    intExt[ieKey] = (intExt[ieKey] || 0) + 1;
+
+    s.characters.forEach((name) => {
+      characterScenes[name] = (characterScenes[name] || 0) + 1;
+    });
+  });
+
+  const toSortedArray = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
+
+  return {
+    locations: toSortedArray(locations),
+    dayNight: toSortedArray(dayNight),
+    intExt: toSortedArray(intExt),
+    characterScenes: toSortedArray(characterScenes),
+  };
+}
+
+function generateBreakdownText(breakdown, title) {
+  const out = [];
+  out.push(`# Script Breakdown${title.trim() ? " — " + title.trim() : ""}`);
+  out.push("");
+  out.push("## Locations");
+  breakdown.locations.forEach(([loc, n]) => out.push(`- ${loc}: ${n} scene${n === 1 ? "" : "s"}`));
+  out.push("");
+  out.push("## Day / Night");
+  breakdown.dayNight.forEach(([k, n]) => out.push(`- ${k}: ${n} scene${n === 1 ? "" : "s"}`));
+  out.push("");
+  out.push("## Interior / Exterior");
+  breakdown.intExt.forEach(([k, n]) => out.push(`- ${k}: ${n} scene${n === 1 ? "" : "s"}`));
+  out.push("");
+  out.push("## Characters by Scene Count");
+  breakdown.characterScenes.forEach(([name, n]) => out.push(`- ${name}: ${n} scene${n === 1 ? "" : "s"}`));
+  return out.join("\n");
+}
+
+/* ---------------------------------------------------------------
+   Find & Replace — flat search across all blocks' text.
+--------------------------------------------------------------- */
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function findMatches(blocks, query) {
+  if (!query) return [];
+  const re = new RegExp(escapeRegExp(query), "gi");
+  const matches = [];
+  blocks.forEach((b) => {
+    let m;
+    re.lastIndex = 0;
+    while ((m = re.exec(b.text)) !== null) {
+      matches.push({ blockId: b.id, start: m.index, end: m.index + m[0].length });
+      if (m.index === re.lastIndex) re.lastIndex++;
+    }
+  });
+  return matches;
+}
+
+/* ---------------------------------------------------------------
    Groups blocks for rendering: pairs a Character marked "dual"
    with the immediately preceding character+dialogue group so they
    can render as two side-by-side columns.
@@ -660,12 +762,22 @@ export default function ScreenplayEditor() {
   const [scriptList, setScriptList] = useState([]);
   const [pickerLoading, setPickerLoading] = useState(false);
   const [pickerError, setPickerError] = useState("");
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const [showFind, setShowFind] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [replaceQuery, setReplaceQuery] = useState("");
+  const [matchIndex, setMatchIndex] = useState(0);
   const fileInputRef = useRef(null);
   const elementsFileInputRef = useRef(null);
   const textRefs = useRef({});
   const autosaveTimer = useRef(null);
   const dragIndexRef = useRef(null);
   const justDraggedRef = useRef(false);
+  const prevBlocksRef = useRef(null);
+  const historyBaseRef = useRef(null);
+  const historyTimerRef = useRef(null);
+  const skipNextHistoryRef = useRef(false);
 
   const resize = (el) => {
     if (!el) return;
@@ -676,6 +788,79 @@ export default function ScreenplayEditor() {
   useEffect(() => {
     Object.values(textRefs.current).forEach(resize);
   }, [blocks]);
+
+  // Undo/redo history — coalesces rapid typing into a single step by
+  // only committing a checkpoint after blocks has been stable for a
+  // moment, so Undo reverts a "burst" of changes rather than one
+  // keystroke at a time.
+  useEffect(() => {
+    const prev = prevBlocksRef.current;
+    prevBlocksRef.current = blocks;
+
+    if (skipNextHistoryRef.current) {
+      skipNextHistoryRef.current = false;
+      return;
+    }
+    if (prev === null || prev === blocks) return;
+
+    if (historyBaseRef.current === null) {
+      historyBaseRef.current = prev;
+    }
+    if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+    historyTimerRef.current = setTimeout(() => {
+      const base = historyBaseRef.current;
+      historyBaseRef.current = null;
+      setUndoStack((prevStack) => {
+        const next = [...prevStack, base];
+        return next.length > 100 ? next.slice(next.length - 100) : next;
+      });
+      setRedoStack([]);
+    }, 600);
+  }, [blocks]);
+
+  const handleUndo = () => {
+    if (undoStack.length === 0) return;
+    const last = undoStack[undoStack.length - 1];
+    setRedoStack((r) => [...r, blocks]);
+    setUndoStack((u) => u.slice(0, -1));
+    skipNextHistoryRef.current = true;
+    historyBaseRef.current = null;
+    if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+    setBlocks(last);
+  };
+
+  const handleRedo = () => {
+    if (redoStack.length === 0) return;
+    const last = redoStack[redoStack.length - 1];
+    setUndoStack((u) => [...u, blocks]);
+    setRedoStack((r) => r.slice(0, -1));
+    skipNextHistoryRef.current = true;
+    historyBaseRef.current = null;
+    if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+    setBlocks(last);
+  };
+
+  // Global shortcuts: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl+Y redo,
+  // Ctrl/Cmd+F opens Find & Replace — work regardless of focus location.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      } else if ((key === "z" && e.shiftKey) || key === "y") {
+        e.preventDefault();
+        handleRedo();
+      } else if (key === "f") {
+        e.preventDefault();
+        setShowFind(true);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
 
   // Load/persist the appearance theme (separate from script content).
   useEffect(() => {
@@ -942,15 +1127,43 @@ export default function ScreenplayEditor() {
     setBlocks((prev) =>
       prev.map((b) => {
         if (b.id !== id) return b;
-        const v = UPPER_TYPES.has(b.type) ? val.toUpperCase() : val;
-        return { ...b, text: v };
+        const isUpper = UPPER_TYPES.has(b.type);
+        const v = isUpper ? val.toUpperCase() : val;
+        // Typing while in an uppercase type means the old pre-uppercase
+        // backup no longer applies — this is now the "real" content.
+        return { ...b, text: v, caseBackup: isUpper ? undefined : b.caseBackup };
       })
     );
   };
 
   const setType = (id, type) => {
     setBlocks((prev) =>
-      prev.map((b) => (b.id === id ? { ...b, type, text: UPPER_TYPES.has(type) ? b.text.toUpperCase() : b.text } : b))
+      prev.map((b) => {
+        if (b.id !== id) return b;
+        const wasUpper = UPPER_TYPES.has(b.type);
+        const willUpper = UPPER_TYPES.has(type);
+        let text = b.text;
+        let caseBackup = b.caseBackup;
+
+        if (!wasUpper && willUpper) {
+          // Entering an uppercase type: remember the original casing.
+          caseBackup = b.text;
+          text = b.text.toUpperCase();
+        } else if (wasUpper && !willUpper) {
+          // Leaving an uppercase type: restore original casing, but only
+          // if nothing was typed since it was uppercased (can't reliably
+          // un-uppercase text the user actually wrote while it was upper).
+          if (caseBackup != null && b.text === caseBackup.toUpperCase()) {
+            text = caseBackup;
+          }
+          caseBackup = undefined;
+        }
+        // Upper-to-upper (e.g. Character -> Scene Heading) keeps the
+        // existing backup untouched so it can still restore correctly
+        // whenever it eventually lands on a non-uppercase type.
+
+        return { ...b, type, text, caseBackup };
+      })
     );
     setPendingFocus({ id, pos: "end" });
   };
@@ -1014,6 +1227,70 @@ export default function ScreenplayEditor() {
   const sceneUnits = useMemo(() => computeSceneUnits(blocks), [blocks]);
 
   const dialogueStats = useMemo(() => computeDialogueStats(blocks), [blocks]);
+
+  const breakdown = useMemo(() => computeBreakdown(scenes), [scenes]);
+
+  const matches = useMemo(() => findMatches(blocks, findQuery), [blocks, findQuery]);
+
+  useEffect(() => {
+    if (matchIndex >= matches.length) setMatchIndex(Math.max(0, matches.length - 1));
+  }, [matches, matchIndex]);
+
+  const gotoMatch = (idx) => {
+    if (matches.length === 0) return;
+    const clamped = ((idx % matches.length) + matches.length) % matches.length;
+    setMatchIndex(clamped);
+    const m = matches[clamped];
+    const el = textRefs.current[m.blockId];
+    if (el) {
+      el.focus();
+      el.setSelectionRange(m.start, m.end);
+      if (el.scrollIntoView) el.scrollIntoView({ block: "center" });
+    }
+  };
+
+  const handleFindNext = () => gotoMatch(matchIndex + 1);
+  const handleFindPrev = () => gotoMatch(matchIndex - 1);
+
+  const handleReplaceOne = () => {
+    if (matches.length === 0) return;
+    const m = matches[matchIndex];
+    setBlocks((prev) =>
+      prev.map((b) => {
+        if (b.id !== m.blockId) return b;
+        const newText = b.text.slice(0, m.start) + replaceQuery + b.text.slice(m.end);
+        return { ...b, text: UPPER_TYPES.has(b.type) ? newText.toUpperCase() : newText };
+      })
+    );
+  };
+
+  const handleReplaceAll = () => {
+    if (!findQuery) return;
+    const lowerQuery = findQuery.toLowerCase();
+    const escaped = escapeRegExp(findQuery);
+    setBlocks((prev) =>
+      prev.map((b) => {
+        if (!b.text.toLowerCase().includes(lowerQuery)) return b;
+        const re = new RegExp(escaped, "gi");
+        const newText = b.text.replace(re, replaceQuery);
+        return { ...b, text: UPPER_TYPES.has(b.type) ? newText.toUpperCase() : newText };
+      })
+    );
+  };
+
+  const handleExportBreakdown = () => {
+    const text = generateBreakdownText(breakdown, title);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    a.href = url;
+    a.download = `${safe}_breakdown.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const getSuggestionsFor = (block) => {
     if (!block) return [];
@@ -1502,6 +1779,12 @@ export default function ScreenplayEditor() {
             { divider: true },
             { label: appPassword ? "Log Out" : "Log In…", onClick: appPassword ? handleLogout : () => setAuthed(false) },
           ])}
+          {renderMenu("edit", "Edit", [
+            { label: `Undo${undoStack.length ? ` (${undoStack.length})` : ""}`, onClick: handleUndo },
+            { label: `Redo${redoStack.length ? ` (${redoStack.length})` : ""}`, onClick: handleRedo },
+            { divider: true },
+            { label: "Find & Replace…", onClick: () => setShowFind(true) },
+          ])}
           {renderMenu("view", "View", [
             { label: "Appearance / Theme…", onClick: () => setShowAppearance(true) },
             { divider: true },
@@ -1513,11 +1796,56 @@ export default function ScreenplayEditor() {
             { label: "Scene Report", onClick: () => { setReportsTab("scenes"); setShowReportsPanel(true); } },
             { label: "Elements", onClick: () => { setReportsTab("elements"); setShowReportsPanel(true); } },
             { label: "Dialogue Statistics", onClick: () => { setReportsTab("dialogue"); setShowReportsPanel(true); } },
+            { label: "Breakdown", onClick: () => { setReportsTab("breakdown"); setShowReportsPanel(true); } },
           ])}
           <input ref={fileInputRef} type="file" accept=".fountain,.txt" style={{ display: "none" }} onChange={handleFile} />
           <button style={styles.btnPrimary} onClick={handleSave}>Save</button>
         </div>
       </div>
+
+      {showFind && (
+        <div style={styles.findBar} className="no-print">
+          <input
+            autoFocus
+            value={findQuery}
+            onChange={(e) => setFindQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                e.shiftKey ? handleFindPrev() : handleFindNext();
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setShowFind(false);
+              }
+            }}
+            placeholder="Find"
+            style={styles.findInput}
+          />
+          <span style={styles.findCount}>{matches.length ? `${matchIndex + 1} / ${matches.length}` : "0 / 0"}</span>
+          <button style={styles.btn} onClick={handleFindPrev} disabled={matches.length === 0}>↑</button>
+          <button style={styles.btn} onClick={handleFindNext} disabled={matches.length === 0}>↓</button>
+          <input
+            value={replaceQuery}
+            onChange={(e) => setReplaceQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleReplaceOne();
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setShowFind(false);
+              }
+            }}
+            placeholder="Replace with"
+            style={styles.findInput}
+          />
+          <button style={styles.btn} onClick={handleReplaceOne} disabled={matches.length === 0}>Replace</button>
+          <button style={styles.btn} onClick={handleReplaceAll} disabled={matches.length === 0}>Replace All</button>
+          <button style={styles.btn} onClick={() => setShowFind(false)}>✕</button>
+        </div>
+      )}
 
       <div style={styles.body}>
         {/* Left rail */}
@@ -1749,6 +2077,12 @@ export default function ScreenplayEditor() {
               >
                 Dialogue
               </button>
+              <button
+                style={{ ...styles.tabBtn, ...(reportsTab === "breakdown" ? styles.tabBtnActive : {}) }}
+                onClick={() => setReportsTab("breakdown")}
+              >
+                Breakdown
+              </button>
             </div>
 
             {reportsTab === "scenes" && (
@@ -1830,6 +2164,47 @@ export default function ScreenplayEditor() {
                     <div style={styles.statBarTrack}>
                       <div style={{ ...styles.statBarFill, width: `${s.pct}%` }} />
                     </div>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {reportsTab === "breakdown" && (
+              <>
+                <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportBreakdown}>
+                  Export Report
+                </button>
+
+                <div style={styles.railLabel}>Locations</div>
+                {breakdown.locations.length === 0 && <div style={{ color: mutedColor, fontSize: "12px", marginBottom: "14px" }}>No scenes yet.</div>}
+                {breakdown.locations.map(([loc, n]) => (
+                  <div key={loc} style={styles.elementRow}>
+                    <span>{loc}</span>
+                    <span style={{ color: mutedColor }}>{n}</span>
+                  </div>
+                ))}
+
+                <div style={{ ...styles.railLabel, marginTop: "18px" }}>Day / Night</div>
+                {breakdown.dayNight.map(([k, n]) => (
+                  <div key={k} style={styles.elementRow}>
+                    <span>{k}</span>
+                    <span style={{ color: mutedColor }}>{n}</span>
+                  </div>
+                ))}
+
+                <div style={{ ...styles.railLabel, marginTop: "18px" }}>Interior / Exterior</div>
+                {breakdown.intExt.map(([k, n]) => (
+                  <div key={k} style={styles.elementRow}>
+                    <span>{k}</span>
+                    <span style={{ color: mutedColor }}>{n}</span>
+                  </div>
+                ))}
+
+                <div style={{ ...styles.railLabel, marginTop: "18px" }}>Characters by Scene Count</div>
+                {breakdown.characterScenes.map(([name, n]) => (
+                  <div key={name} style={styles.elementRow}>
+                    <span>{name}</span>
+                    <span style={{ color: mutedColor }}>{n}</span>
                   </div>
                 ))}
               </>
@@ -2352,6 +2727,25 @@ function buildStyles(t) {
       borderBottom: `1px solid ${line}`,
       cursor: "pointer",
     },
+    findBar: {
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      padding: "8px 18px",
+      borderBottom: `1px solid ${line}`,
+      flexWrap: "wrap",
+    },
+    findInput: {
+      background: "transparent",
+      border: `1px solid ${line}`,
+      borderRadius: "3px",
+      color: t.text,
+      padding: "6px 8px",
+      fontSize: "12.5px",
+      outline: "none",
+      minWidth: "140px",
+    },
+    findCount: { fontSize: "11px", color: mute, minWidth: "48px", textAlign: "center" },
   };
 }
 
