@@ -159,11 +159,20 @@ function bumpIdCounter(items) {
 /* ---------------------------------------------------------------
    Fountain export
 --------------------------------------------------------------- */
-function generateFountain(blocks, title, author) {
+function generateFountain(blocks, title, author, meta = {}) {
   const out = [];
-  if (title.trim() || author.trim()) {
+  const { credit, basedOn, draftDate, contact } = meta;
+  if (title.trim() || author.trim() || credit?.trim() || basedOn?.trim() || draftDate?.trim() || contact?.trim()) {
     if (title.trim()) out.push(`Title: ${title.trim()}`);
+    if (credit?.trim()) out.push(`Credit: ${credit.trim()}`);
     if (author.trim()) out.push(`Author: ${author.trim()}`);
+    if (basedOn?.trim()) out.push(`Source: ${basedOn.trim()}`);
+    if (draftDate?.trim()) out.push(`Draft date: ${draftDate.trim()}`);
+    if (contact?.trim()) {
+      const lines = contact.trim().split("\n");
+      out.push(`Contact: ${lines[0]}`);
+      lines.slice(1).forEach((l) => out.push(`  ${l}`));
+    }
     out.push("");
   }
   let prevType = null;
@@ -208,12 +217,45 @@ function parseFountain(raw) {
   let i = 0;
   let ttl = "";
   let auth = "";
+  let cred = "";
+  let src = "";
+  let draft = "";
+  const contactLines = [];
+  let lastKey = null;
   const titleRe = /^([A-Za-z ]+):\s*(.*)$/;
-  while (i < lines.length && lines[i].trim() !== "" && titleRe.test(lines[i])) {
-    const m = lines[i].match(titleRe);
+  while (i < lines.length && lines[i].trim() !== "") {
+    const raw = lines[i];
+    const isIndented = /^[ \t]/.test(raw);
+    if (isIndented && lastKey) {
+      if (lastKey === "contact") contactLines.push(raw.trim());
+      i++;
+      continue;
+    }
+    if (!titleRe.test(raw)) break;
+    const m = raw.match(titleRe);
     const key = m[1].trim().toLowerCase();
-    if (key === "title") ttl = m[2].trim();
-    if (["author", "authors", "writer", "written by"].includes(key)) auth = m[2].trim();
+    const val = m[2].trim();
+    if (key === "title") {
+      ttl = val;
+      lastKey = "title";
+    } else if (["author", "authors", "writer", "written by"].includes(key)) {
+      auth = val;
+      lastKey = "author";
+    } else if (key === "credit") {
+      cred = val;
+      lastKey = "credit";
+    } else if (["source", "based on"].includes(key)) {
+      src = val;
+      lastKey = "source";
+    } else if (["draft date", "date"].includes(key)) {
+      draft = val;
+      lastKey = "draft";
+    } else if (key === "contact" || key === "contact info") {
+      if (val) contactLines.push(val);
+      lastKey = "contact";
+    } else {
+      lastKey = null;
+    }
     i++;
   }
   while (i < lines.length && lines[i].trim() === "") i++;
@@ -274,7 +316,147 @@ function parseFountain(raw) {
     lastBlank = false;
   }
   if (blocksOut.length === 0) push("scene_heading", "");
-  return { title: ttl, author: auth, blocks: blocksOut };
+  return { title: ttl, author: auth, credit: cred, basedOn: src, draftDate: draft, contact: contactLines.join("\n"), blocks: blocksOut };
+}
+
+/* ---------------------------------------------------------------
+   Final Draft (.fdx) export/import.
+
+   .fdx is XML, not a proprietary binary format — Paragraph "Type"
+   values map directly onto our six element types. Export is high
+   confidence. One honest caveat: dual dialogue's exact nested XML
+   shape isn't consistently documented anywhere authoritative (it's
+   community-reverse-engineered, and Final Draft hasn't published a
+   full spec), so rather than risk emitting a malformed structure,
+   dual-dialogue pairs export as plain sequential Character/Dialogue
+   paragraphs — all the text survives, just not marked "simultaneous"
+   in the FDX itself. Title-page fields on import are also a
+   best-effort guess, since FDX title pages are just a sequence of
+   centered paragraphs with no semantic tag for "this one is the
+   author" vs "this one is the draft date."
+--------------------------------------------------------------- */
+const FDX_TYPE_MAP = {
+  scene_heading: "Scene Heading",
+  action: "Action",
+  character: "Character",
+  parenthetical: "Parenthetical",
+  dialogue: "Dialogue",
+  transition: "Transition",
+};
+
+function xmlEscape(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function generateFDX(blocks, title, author, meta = {}) {
+  const { credit, basedOn, draftDate, contact } = meta;
+  const out = [];
+  out.push('<?xml version="1.0" encoding="UTF-8" standalone="no" ?>');
+  out.push('<FinalDraft DocumentType="Script" Template="No" Version="1">');
+  out.push("  <Content>");
+
+  let sceneNum = 0;
+  blocks.forEach((b) => {
+    if (!b.text.trim()) return;
+    const type = FDX_TYPE_MAP[b.type] || "Action";
+    let numberAttr = "";
+    if (b.type === "scene_heading") {
+      sceneNum++;
+      numberAttr = ` Number="${sceneNum}"`;
+    }
+    out.push(`    <Paragraph Type="${type}"${numberAttr}>`);
+    out.push(`      <Text>${xmlEscape(b.text)}</Text>`);
+    out.push("    </Paragraph>");
+  });
+
+  out.push("  </Content>");
+
+  const hasTitlePage = title.trim() || author.trim() || credit?.trim() || basedOn?.trim() || draftDate?.trim() || contact?.trim();
+  if (hasTitlePage) {
+    out.push("  <TitlePage>");
+    out.push("    <Content>");
+    const centeredLine = (text) => {
+      out.push('      <Paragraph Alignment="Center">');
+      out.push(`        <Text>${xmlEscape(text)}</Text>`);
+      out.push("      </Paragraph>");
+    };
+    if (title.trim()) centeredLine(title.trim());
+    if (credit?.trim() || author.trim()) centeredLine(credit?.trim() || "Written by");
+    if (author.trim()) centeredLine(author.trim());
+    if (basedOn?.trim()) centeredLine(basedOn.trim());
+    if (draftDate?.trim()) centeredLine(draftDate.trim());
+    if (contact?.trim()) contact.trim().split("\n").forEach((line) => centeredLine(line));
+    out.push("    </Content>");
+    out.push("  </TitlePage>");
+  }
+
+  out.push("</FinalDraft>");
+  return out.join("\n");
+}
+
+function parseFDX(xml) {
+  const fallback = { title: "", author: "", credit: "", basedOn: "", draftDate: "", contact: "", blocks: [{ id: newId(), type: "scene_heading", text: "" }] };
+  let doc;
+  try {
+    doc = new DOMParser().parseFromString(xml, "text/xml");
+  } catch (e) {
+    return fallback;
+  }
+  if (doc.querySelector("parsererror")) return fallback;
+
+  const typeMap = {
+    "scene heading": "scene_heading",
+    action: "action",
+    character: "character",
+    parenthetical: "parenthetical",
+    dialogue: "dialogue",
+    transition: "transition",
+    shot: "action",
+    general: "action",
+  };
+
+  const blocksOut = [];
+  doc.querySelectorAll("Content > Paragraph").forEach((p) => {
+    const rawType = (p.getAttribute("Type") || "Action").toLowerCase();
+    const type = typeMap[rawType] || "action";
+    const textNodes = p.querySelectorAll("Text");
+    let text = "";
+    if (textNodes.length > 0) {
+      textNodes.forEach((tn) => (text += tn.textContent));
+    } else {
+      text = p.textContent || "";
+    }
+    text = text.trim();
+    if (!text) return;
+    blocksOut.push({ id: newId(), type, text });
+  });
+  if (blocksOut.length === 0) blocksOut.push({ id: newId(), type: "scene_heading", text: "" });
+
+  // Title page: FDX doesn't tag which centered line means what, so
+  // this is a best-effort guess — first line is the title, a line
+  // matching "Written/Story/Screenplay by" is treated as the credit
+  // with the next line as author, otherwise the second line is
+  // assumed to be the author.
+  let ttl = "", auth = "", cred = "";
+  const titleLines = Array.from(doc.querySelectorAll("TitlePage Content Paragraph"))
+    .map((p) => (p.querySelector("Text")?.textContent || p.textContent || "").trim())
+    .filter(Boolean);
+  if (titleLines.length > 0) {
+    ttl = titleLines[0];
+    const creditIdx = titleLines.findIndex((l, i) => i > 0 && /^(written|story|screenplay)\s+by$/i.test(l));
+    if (creditIdx !== -1) {
+      cred = titleLines[creditIdx];
+      auth = titleLines[creditIdx + 1] || "";
+    } else if (titleLines.length > 1) {
+      auth = titleLines[1];
+    }
+  }
+
+  return { title: ttl, author: auth, credit: cred, basedOn: "", draftDate: "", contact: "", blocks: blocksOut };
 }
 
 /* ---------------------------------------------------------------
@@ -644,19 +826,46 @@ const PDF_LAYOUT = {
   transition: { left: 0, width: PDF_CONTENT_WIDTH },
 };
 
-function buildScreenplayPdf(blocks, title, author, showSceneNumbers) {
+function buildScreenplayPdf(blocks, title, author, showSceneNumbers, meta = {}) {
   const doc = new jsPDF({ unit: "in", format: "letter" });
   doc.setFont("courier", "normal");
   doc.setFontSize(12);
 
-  if (title.trim() || author.trim()) {
+  const { credit, basedOn, draftDate, contact } = meta;
+  const hasTitlePage = title.trim() || author.trim() || credit?.trim() || basedOn?.trim() || draftDate?.trim() || contact?.trim();
+
+  if (hasTitlePage) {
     doc.setFont("courier", "bold");
-    doc.text(title.trim() || "Untitled", PDF_PAGE_W / 2, 4, { align: "center" });
+    doc.text(title.trim() || "Untitled", PDF_PAGE_W / 2, 3.6, { align: "center" });
     doc.setFont("courier", "normal");
-    if (author.trim()) {
-      doc.text("by", PDF_PAGE_W / 2, 4.6, { align: "center" });
-      doc.text(author.trim(), PDF_PAGE_W / 2, 4.9, { align: "center" });
+    let ty = 4.3;
+    if (credit?.trim() || author.trim()) {
+      doc.text(credit?.trim() || "by", PDF_PAGE_W / 2, ty, { align: "center" });
+      ty += 0.3;
     }
+    if (author.trim()) {
+      doc.text(author.trim(), PDF_PAGE_W / 2, ty, { align: "center" });
+      ty += 0.3;
+    }
+    if (basedOn?.trim()) {
+      ty += 0.3;
+      doc.text(basedOn.trim(), PDF_PAGE_W / 2, ty, { align: "center" });
+    }
+
+    doc.setFontSize(10);
+    if (draftDate?.trim()) {
+      doc.text(draftDate.trim(), PDF_PAGE_W - PDF_MARGIN_RIGHT, PDF_PAGE_H - 0.9, { align: "right" });
+    }
+    if (contact?.trim()) {
+      const lines = contact.trim().split("\n");
+      let cy = PDF_PAGE_H - 0.9 - (lines.length - 1) * 0.18;
+      lines.forEach((ln) => {
+        doc.text(ln, PDF_MARGIN_LEFT - 0.3, cy);
+        cy += 0.18;
+      });
+    }
+    doc.setFontSize(12);
+
     doc.addPage();
   }
 
@@ -734,6 +943,11 @@ function buildScreenplayPdf(blocks, title, author, showSceneNumbers) {
 export default function ScreenplayEditor() {
   const [title, setTitle] = useState("Untitled Screenplay");
   const [author, setAuthor] = useState("");
+  const [credit, setCredit] = useState("Written by");
+  const [basedOn, setBasedOn] = useState("");
+  const [draftDate, setDraftDate] = useState("");
+  const [contact, setContact] = useState("");
+  const [showTitlePage, setShowTitlePage] = useState(false);
   const [blocks, setBlocks] = useState([{ id: newId(), type: "scene_heading", text: "" }]);
   const [focusedId, setFocusedId] = useState(blocks[0].id);
   const [pendingFocus, setPendingFocus] = useState(null);
@@ -979,6 +1193,10 @@ export default function ScreenplayEditor() {
     const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
     setTitle(data.title || "Untitled Screenplay");
     setAuthor(data.author || "");
+    setCredit(data.credit || "Written by");
+    setBasedOn(data.basedOn || "");
+    setDraftDate(data.draftDate || "");
+    setContact(data.contact || "");
     setBlocks(restoredBlocks);
     setElements(data.elements || []);
     setFocusedId(restoredBlocks[0].id);
@@ -994,7 +1212,7 @@ export default function ScreenplayEditor() {
     if (!loaded || !authed || !appPassword || !currentScriptId) return;
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     const savedAt = new Date().toISOString();
-    saveCloudScript(appPassword, currentScriptId, { title, author, blocks, elements, savedAt }).then((ok) => {
+    saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, savedAt }).then((ok) => {
       if (ok) setLastSaved(savedAt);
     });
   };
@@ -1051,6 +1269,10 @@ export default function ScreenplayEditor() {
       const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
       setTitle(data.title || "Untitled Screenplay");
       setAuthor(data.author || "");
+      setCredit(data.credit || "Written by");
+      setBasedOn(data.basedOn || "");
+      setDraftDate(data.draftDate || "");
+      setContact(data.contact || "");
       setBlocks(restoredBlocks);
       setElements(data.elements || []);
       setFocusedId(restoredBlocks[0].id);
@@ -1093,20 +1315,20 @@ export default function ScreenplayEditor() {
     autosaveTimer.current = setTimeout(() => {
       const savedAt = new Date().toISOString();
       if (appPassword && currentScriptId) {
-        saveCloudScript(appPassword, currentScriptId, { title, author, blocks, elements, savedAt }).then((ok) => {
+        saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, savedAt }).then((ok) => {
           if (ok) {
             setLastSaved(savedAt);
             setScriptList((prev) => prev.map((s) => (s.id === currentScriptId ? { ...s, title, updatedAt: savedAt } : s)));
           }
         });
       } else {
-        saveScriptData({ title, author, blocks, elements, savedAt }).then((ok) => {
+        saveScriptData({ title, author, credit, basedOn, draftDate, contact, blocks, elements, savedAt }).then((ok) => {
           if (ok) setLastSaved(savedAt);
         });
       }
     }, 800);
     return () => clearTimeout(autosaveTimer.current);
-  }, [blocks, title, author, elements, loaded, authed, appPassword, currentScriptId]);
+  }, [blocks, title, author, credit, basedOn, draftDate, contact, elements, loaded, authed, appPassword, currentScriptId]);
 
   useEffect(() => {
     if (!pendingFocus) return;
@@ -1506,13 +1728,17 @@ export default function ScreenplayEditor() {
     setBlocks(blank);
     setTitle("Untitled Screenplay");
     setAuthor("");
+    setCredit("Written by");
+    setBasedOn("");
+    setDraftDate("");
+    setContact("");
     setElements([]);
     setPendingFocus({ id, pos: "start" });
-    saveScriptData({ title: "Untitled Screenplay", author: "", blocks: blank, elements: [], savedAt: new Date().toISOString() });
+    saveScriptData({ title: "Untitled Screenplay", author: "", credit: "Written by", basedOn: "", draftDate: "", contact: "", blocks: blank, elements: [], savedAt: new Date().toISOString() });
   };
 
   const handleSave = () => {
-    const text = generateFountain(blocks, title, author);
+    const text = generateFountain(blocks, title, author, { credit, basedOn, draftDate, contact });
     const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1526,9 +1752,23 @@ export default function ScreenplayEditor() {
   };
 
   const handleExportPDF = () => {
-    const doc = buildScreenplayPdf(blocks, title, author, showSceneNumbers);
+    const doc = buildScreenplayPdf(blocks, title, author, showSceneNumbers, { credit, basedOn, draftDate, contact });
     const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
     doc.save(`${safe}.pdf`);
+  };
+
+  const handleExportFDX = () => {
+    const text = generateFDX(blocks, title, author, { credit, basedOn, draftDate, contact });
+    const blob = new Blob([text], { type: "application/xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    a.href = url;
+    a.download = `${safe}.fdx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleLoadClick = () => fileInputRef.current?.click();
@@ -1536,21 +1776,28 @@ export default function ScreenplayEditor() {
   const handleFile = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const isFdx = /\.fdx$/i.test(file.name);
     const reader = new FileReader();
     reader.onload = () => {
-      const { title: t, author: a, blocks: b } = parseFountain(String(reader.result));
+      const raw = String(reader.result);
+      const { title: t, author: a, credit: c, basedOn: bo, draftDate: dd, contact: ct, blocks: b } = isFdx ? parseFDX(raw) : parseFountain(raw);
       const newTitle = t || file.name.replace(/\.[^.]+$/, "");
       setTitle(newTitle);
       setAuthor(a || "");
+      setCredit(c || "Written by");
+      setBasedOn(bo || "");
+      setDraftDate(dd || "");
+      setContact(ct || "");
       setBlocks(b);
       setPendingFocus({ id: b[0].id, pos: "start" });
       const savedAt = new Date().toISOString();
+      const payload = { title: newTitle, author: a || "", credit: c || "Written by", basedOn: bo || "", draftDate: dd || "", contact: ct || "", blocks: b, elements, savedAt };
       if (appPassword && currentScriptId) {
-        saveCloudScript(appPassword, currentScriptId, { title: newTitle, author: a || "", blocks: b, elements, savedAt }).then((ok) => {
+        saveCloudScript(appPassword, currentScriptId, payload).then((ok) => {
           if (ok) setLastSaved(savedAt);
         });
       } else {
-        saveScriptData({ title: newTitle, author: a || "", blocks: b, elements, savedAt });
+        saveScriptData(payload);
       }
     };
     reader.readAsText(file);
@@ -1769,11 +2016,14 @@ export default function ScreenplayEditor() {
         <div style={styles.headerActions}>
           {renderMenu("file", "File", [
             { label: "New", onClick: handleNew },
-            { label: "Load Script…", onClick: handleLoadClick },
+            { label: "Load Script… (.fountain/.fdx)", onClick: handleLoadClick },
             ...(appPassword ? [{ label: "My Scripts…", onClick: () => { flushSave(); setShowPicker(true); } }] : []),
+            { divider: true },
+            { label: "Title Page…", onClick: () => setShowTitlePage(true) },
             { divider: true },
             { label: "Save .fountain", onClick: handleSave },
             { label: "Export PDF", onClick: handleExportPDF },
+            { label: "Export .fdx (Final Draft)", onClick: handleExportFDX },
             { divider: true },
             { label: "Print", onClick: () => window.print() },
             { divider: true },
@@ -1798,7 +2048,7 @@ export default function ScreenplayEditor() {
             { label: "Dialogue Statistics", onClick: () => { setReportsTab("dialogue"); setShowReportsPanel(true); } },
             { label: "Breakdown", onClick: () => { setReportsTab("breakdown"); setShowReportsPanel(true); } },
           ])}
-          <input ref={fileInputRef} type="file" accept=".fountain,.txt" style={{ display: "none" }} onChange={handleFile} />
+          <input ref={fileInputRef} type="file" accept=".fountain,.txt,.fdx" style={{ display: "none" }} onChange={handleFile} />
           <button style={styles.btnPrimary} onClick={handleSave}>Save</button>
         </div>
       </div>
@@ -2209,6 +2459,42 @@ export default function ScreenplayEditor() {
                 ))}
               </>
             )}
+          </div>
+        </>
+      )}
+
+      {/* Title Page panel */}
+      {showTitlePage && (
+        <>
+          <div style={styles.overlay} className="no-print" onClick={() => setShowTitlePage(false)} />
+          <div style={styles.panel} className="no-print">
+            <div style={styles.panelHeader}>
+              <span style={styles.brandText}>TITLE PAGE</span>
+              <button style={styles.btn} onClick={() => setShowTitlePage(false)}>Close</button>
+            </div>
+
+            <div style={styles.fieldLabel}>Title</div>
+            <input style={styles.authInput} value={title} onChange={(e) => setTitle(e.target.value)} />
+
+            <div style={styles.fieldLabel}>Credit (byline)</div>
+            <input style={styles.authInput} value={credit} onChange={(e) => setCredit(e.target.value)} placeholder="Written by" />
+
+            <div style={styles.fieldLabel}>Author</div>
+            <input style={styles.authInput} value={author} onChange={(e) => setAuthor(e.target.value)} />
+
+            <div style={styles.fieldLabel}>Based On</div>
+            <input style={styles.authInput} value={basedOn} onChange={(e) => setBasedOn(e.target.value)} placeholder="Based on the novel by…" />
+
+            <div style={styles.fieldLabel}>Draft / Date</div>
+            <input style={styles.authInput} value={draftDate} onChange={(e) => setDraftDate(e.target.value)} placeholder="1st Draft — March 2026" />
+
+            <div style={styles.fieldLabel}>Contact</div>
+            <textarea
+              style={{ ...styles.authInput, minHeight: "70px", resize: "vertical", fontFamily: "inherit" }}
+              value={contact}
+              onChange={(e) => setContact(e.target.value)}
+              placeholder={"Name\nPhone\nEmail"}
+            />
           </div>
         </>
       )}
@@ -2700,7 +2986,10 @@ function buildStyles(t) {
       padding: "9px 10px",
       fontSize: "13px",
       outline: "none",
+      width: "100%",
+      marginBottom: "14px",
     },
+    fieldLabel: { fontSize: "11px", letterSpacing: "1px", color: mute, marginBottom: "6px", textTransform: "uppercase" },
     authError: { fontSize: "12px", color: "#e08080" },
     authSkip: {
       background: "transparent",
