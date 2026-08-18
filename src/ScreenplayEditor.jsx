@@ -748,6 +748,23 @@ function generateBreakdownText(breakdown, title) {
 }
 
 /* ---------------------------------------------------------------
+   Step outline export — free-form scene-by-scene notes, entirely
+   separate from both the script content and the corkboard's
+   auto-derived cards.
+--------------------------------------------------------------- */
+function generateOutlineText(stepOutline, title) {
+  const out = [];
+  out.push(`# Outline${title.trim() ? " — " + title.trim() : ""}`);
+  out.push("");
+  stepOutline.forEach((entry, i) => {
+    out.push(`## ${i + 1}. ${entry.heading.trim() || "(untitled)"}`);
+    if (entry.body.trim()) out.push(entry.body.trim());
+    out.push("");
+  });
+  return out.join("\n");
+}
+
+/* ---------------------------------------------------------------
    Find & Replace — flat search across all blocks' text.
 --------------------------------------------------------------- */
 function escapeRegExp(str) {
@@ -953,6 +970,7 @@ export default function ScreenplayEditor() {
   const [pendingFocus, setPendingFocus] = useState(null);
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [elements, setElements] = useState([]);
+  const [stepOutline, setStepOutline] = useState([]);
   const [activeSelection, setActiveSelection] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [showReportsPanel, setShowReportsPanel] = useState(false);
@@ -964,7 +982,7 @@ export default function ScreenplayEditor() {
   const [showAppearance, setShowAppearance] = useState(false);
   const [openMenu, setOpenMenu] = useState(null);
   const [showSceneNumbers, setShowSceneNumbers] = useState(false);
-  const [outlineMode, setOutlineMode] = useState(false);
+  const [viewMode, setViewMode] = useState("script"); // "script" | "corkboard" | "outline"
   const [authed, setAuthed] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
   const [appPassword, setAppPassword] = useState(null);
@@ -988,6 +1006,7 @@ export default function ScreenplayEditor() {
   const autosaveTimer = useRef(null);
   const dragIndexRef = useRef(null);
   const justDraggedRef = useRef(false);
+  const outlineDragIndexRef = useRef(null);
   const prevBlocksRef = useRef(null);
   const historyBaseRef = useRef(null);
   const historyTimerRef = useRef(null);
@@ -1189,7 +1208,7 @@ export default function ScreenplayEditor() {
 
   // Populate the editor from a full script record (from open or create).
   const openScriptData = (data, id) => {
-    bumpIdCounter([...(data.blocks || []), ...(data.elements || [])]);
+    bumpIdCounter([...(data.blocks || []), ...(data.elements || []), ...(data.stepOutline || [])]);
     const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
     setTitle(data.title || "Untitled Screenplay");
     setAuthor(data.author || "");
@@ -1199,6 +1218,7 @@ export default function ScreenplayEditor() {
     setContact(data.contact || "");
     setBlocks(restoredBlocks);
     setElements(data.elements || []);
+    setStepOutline(data.stepOutline || []);
     setFocusedId(restoredBlocks[0].id);
     setLastSaved(data.savedAt || null);
     setCurrentScriptId(id);
@@ -1212,7 +1232,7 @@ export default function ScreenplayEditor() {
     if (!loaded || !authed || !appPassword || !currentScriptId) return;
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     const savedAt = new Date().toISOString();
-    saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, savedAt }).then((ok) => {
+    saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, savedAt }).then((ok) => {
       if (ok) setLastSaved(savedAt);
     });
   };
@@ -1265,7 +1285,7 @@ export default function ScreenplayEditor() {
         setLoaded(true);
         return;
       }
-      bumpIdCounter([...(data.blocks || []), ...(data.elements || [])]);
+      bumpIdCounter([...(data.blocks || []), ...(data.elements || []), ...(data.stepOutline || [])]);
       const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
       setTitle(data.title || "Untitled Screenplay");
       setAuthor(data.author || "");
@@ -1275,6 +1295,7 @@ export default function ScreenplayEditor() {
       setContact(data.contact || "");
       setBlocks(restoredBlocks);
       setElements(data.elements || []);
+      setStepOutline(data.stepOutline || []);
       setFocusedId(restoredBlocks[0].id);
       if (data.savedAt) setLastSaved(data.savedAt);
       setLoaded(true);
@@ -1315,20 +1336,20 @@ export default function ScreenplayEditor() {
     autosaveTimer.current = setTimeout(() => {
       const savedAt = new Date().toISOString();
       if (appPassword && currentScriptId) {
-        saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, savedAt }).then((ok) => {
+        saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, savedAt }).then((ok) => {
           if (ok) {
             setLastSaved(savedAt);
             setScriptList((prev) => prev.map((s) => (s.id === currentScriptId ? { ...s, title, updatedAt: savedAt } : s)));
           }
         });
       } else {
-        saveScriptData({ title, author, credit, basedOn, draftDate, contact, blocks, elements, savedAt }).then((ok) => {
+        saveScriptData({ title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, savedAt }).then((ok) => {
           if (ok) setLastSaved(savedAt);
         });
       }
     }, 800);
     return () => clearTimeout(autosaveTimer.current);
-  }, [blocks, title, author, credit, basedOn, draftDate, contact, elements, loaded, authed, appPassword, currentScriptId]);
+  }, [blocks, title, author, credit, basedOn, draftDate, contact, elements, stepOutline, loaded, authed, appPassword, currentScriptId]);
 
   useEffect(() => {
     if (!pendingFocus) return;
@@ -1514,6 +1535,20 @@ export default function ScreenplayEditor() {
     URL.revokeObjectURL(url);
   };
 
+  const handleExportOutline = () => {
+    const text = generateOutlineText(stepOutline, title);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    a.href = url;
+    a.download = `${safe}_outline.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const getSuggestionsFor = (block) => {
     if (!block) return [];
     if (block.type === "character") {
@@ -1590,8 +1625,43 @@ export default function ScreenplayEditor() {
 
   const handleCardClick = (headingId) => {
     if (justDraggedRef.current || !headingId) return;
-    setOutlineMode(false);
+    setViewMode("script");
     setPendingFocus({ id: headingId, pos: "start" });
+  };
+
+  const handleAddOutlineEntry = () => {
+    setStepOutline((prev) => [...prev, { id: newId(), heading: "", body: "" }]);
+  };
+
+  const handleUpdateOutlineEntry = (id, field, value) => {
+    setStepOutline((prev) => prev.map((entry) => (entry.id === id ? { ...entry, [field]: value } : entry)));
+  };
+
+  const handleDeleteOutlineEntry = (id) => {
+    setStepOutline((prev) => prev.filter((entry) => entry.id !== id));
+  };
+
+  const handleOutlineDragStart = (e, idx) => {
+    outlineDragIndexRef.current = idx;
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleOutlineDragOver = (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const handleOutlineDrop = (e, idx) => {
+    e.preventDefault();
+    const from = outlineDragIndexRef.current;
+    outlineDragIndexRef.current = null;
+    if (from === null || from === idx) return;
+    setStepOutline((prev) => {
+      const arr = [...prev];
+      const [moved] = arr.splice(from, 1);
+      arr.splice(idx, 0, moved);
+      return arr;
+    });
   };
 
   const markElement = (blockId, start, end, category) => {
@@ -1733,8 +1803,9 @@ export default function ScreenplayEditor() {
     setDraftDate("");
     setContact("");
     setElements([]);
+    setStepOutline([]);
     setPendingFocus({ id, pos: "start" });
-    saveScriptData({ title: "Untitled Screenplay", author: "", credit: "Written by", basedOn: "", draftDate: "", contact: "", blocks: blank, elements: [], savedAt: new Date().toISOString() });
+    saveScriptData({ title: "Untitled Screenplay", author: "", credit: "Written by", basedOn: "", draftDate: "", contact: "", blocks: blank, elements: [], stepOutline: [], savedAt: new Date().toISOString() });
   };
 
   const handleSave = () => {
@@ -1791,7 +1862,7 @@ export default function ScreenplayEditor() {
       setBlocks(b);
       setPendingFocus({ id: b[0].id, pos: "start" });
       const savedAt = new Date().toISOString();
-      const payload = { title: newTitle, author: a || "", credit: c || "Written by", basedOn: bo || "", draftDate: dd || "", contact: ct || "", blocks: b, elements, savedAt };
+      const payload = { title: newTitle, author: a || "", credit: c || "Written by", basedOn: bo || "", draftDate: dd || "", contact: ct || "", blocks: b, elements, stepOutline, savedAt };
       if (appPassword && currentScriptId) {
         saveCloudScript(appPassword, currentScriptId, payload).then((ok) => {
           if (ok) setLastSaved(savedAt);
@@ -2039,7 +2110,9 @@ export default function ScreenplayEditor() {
             { label: "Appearance / Theme…", onClick: () => setShowAppearance(true) },
             { divider: true },
             { label: "Scene Numbers", checkbox: showSceneNumbers, onClick: () => setShowSceneNumbers((v) => !v) },
-            { label: outlineMode ? "Script View" : "Outline View", onClick: () => setOutlineMode((v) => !v) },
+            { label: "Script View", checkbox: viewMode === "script", onClick: () => setViewMode("script") },
+            { label: "Corkboard", checkbox: viewMode === "corkboard", onClick: () => setViewMode((v) => (v === "corkboard" ? "script" : "corkboard")) },
+            { label: "Outline", checkbox: viewMode === "outline", onClick: () => setViewMode((v) => (v === "outline" ? "script" : "outline")) },
             { label: railCollapsed ? "Expand Left Panel" : "Collapse Left Panel", onClick: () => setRailCollapsed((v) => !v) },
           ])}
           {renderMenu("reports", "Reports", [
@@ -2099,7 +2172,7 @@ export default function ScreenplayEditor() {
 
       <div style={styles.body}>
         {/* Left rail */}
-        {!outlineMode && (
+        {viewMode === "script" && (
         <div style={{ ...styles.rail, ...(railCollapsed ? styles.railCollapsed : {}) }} className="no-print">
           <button
             style={styles.railToggle}
@@ -2188,8 +2261,8 @@ export default function ScreenplayEditor() {
         </div>
         )}
 
-        {outlineMode ? (
-          /* Corkboard / outline view */
+        {viewMode === "corkboard" ? (
+          /* Corkboard / index card view — auto-derived from real scenes */
           <div style={styles.corkboardWrap} className="no-print">
             <div style={styles.corkboard}>
               {sceneUnits.map((u, i) => {
@@ -2223,6 +2296,48 @@ export default function ScreenplayEditor() {
                   </div>
                 );
               })}
+            </div>
+          </div>
+        ) : viewMode === "outline" ? (
+          /* Step outline — free-form prose notes, independent of the
+             actual script content and the corkboard's auto-derived cards. */
+          <div style={styles.corkboardWrap} className="no-print">
+            <div style={styles.outlineList}>
+              <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+                <button style={styles.btnPrimary} onClick={handleAddOutlineEntry}>+ Add Scene</button>
+                <button style={styles.btn} onClick={handleExportOutline} disabled={stepOutline.length === 0}>Export Outline</button>
+              </div>
+              {stepOutline.length === 0 && (
+                <div style={{ color: mutedColor, fontSize: "13px" }}>No outline entries yet — add your first scene above.</div>
+              )}
+              {stepOutline.map((entry, idx) => (
+                <div
+                  key={entry.id}
+                  style={styles.outlineEntry}
+                  draggable
+                  onDragStart={(e) => handleOutlineDragStart(e, idx)}
+                  onDragOver={handleOutlineDragOver}
+                  onDrop={(e) => handleOutlineDrop(e, idx)}
+                >
+                  <div style={styles.outlineEntryHeader}>
+                    <span style={styles.outlineEntryNum}>{idx + 1}</span>
+                    <input
+                      style={styles.outlineHeadingInput}
+                      value={entry.heading}
+                      placeholder="Scene title / slug"
+                      onChange={(e) => handleUpdateOutlineEntry(entry.id, "heading", e.target.value)}
+                    />
+                    <button style={styles.elementRemove} onClick={() => handleDeleteOutlineEntry(entry.id)} title="Delete">×</button>
+                  </div>
+                  <textarea
+                    style={styles.outlineBodyInput}
+                    value={entry.body}
+                    placeholder="What happens in this scene…"
+                    onChange={(e) => handleUpdateOutlineEntry(entry.id, "body", e.target.value)}
+                    rows={3}
+                  />
+                </div>
+              ))}
             </div>
           </div>
         ) : (
@@ -2266,14 +2381,18 @@ export default function ScreenplayEditor() {
 
       {/* Status bar */}
       <div style={styles.statusBar} className="no-print">
-        {outlineMode ? (
+        {viewMode === "corkboard" ? (
+          <span style={styles.statusPill}>Corkboard</span>
+        ) : viewMode === "outline" ? (
           <span style={styles.statusPill}>Outline</span>
         ) : (
           <span style={styles.statusPill}>{LABELS[focusedType]}</span>
         )}
         <span style={styles.statusText}>
-          {outlineMode
+          {viewMode === "corkboard"
             ? `${sceneUnits.filter((u) => u.headingId !== null).length} scenes · drag cards to reorder`
+            : viewMode === "outline"
+            ? `${stepOutline.length} outline entr${stepOutline.length === 1 ? "y" : "ies"} · drag to reorder`
             : `${wordCount} words · ~${pageEstimate} page${pageEstimate === 1 ? "" : "s"}`}
           {lastSaved ? ` · Saved ${new Date(lastSaved).toLocaleTimeString()}` : ""}
           {authed ? (appPassword ? " · Cloud sync on" : " · Local only") : ""}
@@ -2948,6 +3067,39 @@ function buildStyles(t) {
     cardHeading: { fontWeight: 700, fontSize: "11.5px", marginBottom: "8px", paddingRight: "18px" },
     cardPreview: { fontSize: "10.5px", color: "#4a4a4a", marginBottom: "8px", lineHeight: 1.4 },
     cardChars: { fontSize: "10px", color: "#8a8578", marginTop: "auto" },
+    outlineList: { maxWidth: "700px", margin: "0 auto" },
+    outlineEntry: {
+      background: mix(t.ink, t.text, 0.06),
+      border: `1px solid ${line}`,
+      borderRadius: "5px",
+      padding: "12px",
+      marginBottom: "12px",
+      cursor: "grab",
+    },
+    outlineEntryHeader: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" },
+    outlineEntryNum: { fontSize: "12px", color: t.gold, fontWeight: 700, minWidth: "20px" },
+    outlineHeadingInput: {
+      flex: 1,
+      background: "transparent",
+      border: "none",
+      borderBottom: `1px solid ${line}`,
+      color: t.text,
+      fontSize: "13px",
+      fontWeight: 700,
+      padding: "4px 2px",
+      outline: "none",
+    },
+    outlineBodyInput: {
+      width: "100%",
+      background: "transparent",
+      border: "none",
+      color: t.text,
+      fontSize: "13px",
+      lineHeight: 1.5,
+      outline: "none",
+      resize: "vertical",
+      fontFamily: "inherit",
+    },
     statRow: { marginBottom: "12px" },
     statBarTrack: { height: "6px", background: line, borderRadius: "3px", marginTop: "4px", overflow: "hidden" },
     statBarFill: { height: "100%", background: t.gold },
