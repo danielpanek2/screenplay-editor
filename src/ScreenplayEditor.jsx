@@ -765,6 +765,26 @@ function generateOutlineText(stepOutline, title) {
 }
 
 /* ---------------------------------------------------------------
+   Character bible — notes per character, separate from the Elements
+   tracker (which is about capitalization/continuity, not narrative).
+--------------------------------------------------------------- */
+function generateCharacterBibleText(characterBible, title) {
+  const out = [];
+  out.push(`# Character Bible${title.trim() ? " — " + title.trim() : ""}`);
+  out.push("");
+  characterBible.forEach((entry) => {
+    out.push(`## ${entry.name.trim() || "(unnamed)"}${entry.age.trim() ? ` (${entry.age.trim()})` : ""}`);
+    if (entry.description.trim()) out.push(entry.description.trim());
+    if (entry.arc.trim()) {
+      out.push("");
+      out.push(`**Arc:** ${entry.arc.trim()}`);
+    }
+    out.push("");
+  });
+  return out.join("\n");
+}
+
+/* ---------------------------------------------------------------
    Find & Replace — flat search across all blocks' text.
 --------------------------------------------------------------- */
 function escapeRegExp(str) {
@@ -994,6 +1014,7 @@ export default function ScreenplayEditor() {
   const [sceneListCollapsed, setSceneListCollapsed] = useState(false);
   const [elements, setElements] = useState([]);
   const [stepOutline, setStepOutline] = useState([]);
+  const [characterBible, setCharacterBible] = useState([]);
   const [availableVoices, setAvailableVoices] = useState([]);
   const [isReading, setIsReading] = useState(false);
   const [readingBlockId, setReadingBlockId] = useState(null);
@@ -1033,6 +1054,7 @@ export default function ScreenplayEditor() {
   const dragIndexRef = useRef(null);
   const justDraggedRef = useRef(false);
   const outlineDragIndexRef = useRef(null);
+  const bibleDragIndexRef = useRef(null);
   const voiceMapRef = useRef({});
   const narratorVoiceRef = useRef(null);
   const readQueueRef = useRef([]);
@@ -1256,7 +1278,7 @@ export default function ScreenplayEditor() {
 
   // Populate the editor from a full script record (from open or create).
   const openScriptData = (data, id) => {
-    bumpIdCounter([...(data.blocks || []), ...(data.elements || []), ...(data.stepOutline || [])]);
+    bumpIdCounter([...(data.blocks || []), ...(data.elements || []), ...(data.stepOutline || []), ...(data.characterBible || [])]);
     const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
     setTitle(data.title || "Untitled Screenplay");
     setAuthor(data.author || "");
@@ -1267,6 +1289,7 @@ export default function ScreenplayEditor() {
     setBlocks(restoredBlocks);
     setElements(data.elements || []);
     setStepOutline(data.stepOutline || []);
+    setCharacterBible(data.characterBible || []);
     setFocusedId(restoredBlocks[0].id);
     setLastSaved(data.savedAt || null);
     setCurrentScriptId(id);
@@ -1280,7 +1303,7 @@ export default function ScreenplayEditor() {
     if (!loaded || !authed || !appPassword || !currentScriptId) return;
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     const savedAt = new Date().toISOString();
-    saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, savedAt }).then((ok) => {
+    saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, savedAt }).then((ok) => {
       if (ok) setLastSaved(savedAt);
     });
   };
@@ -1333,7 +1356,7 @@ export default function ScreenplayEditor() {
         setLoaded(true);
         return;
       }
-      bumpIdCounter([...(data.blocks || []), ...(data.elements || []), ...(data.stepOutline || [])]);
+      bumpIdCounter([...(data.blocks || []), ...(data.elements || []), ...(data.stepOutline || []), ...(data.characterBible || [])]);
       const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
       setTitle(data.title || "Untitled Screenplay");
       setAuthor(data.author || "");
@@ -1344,6 +1367,7 @@ export default function ScreenplayEditor() {
       setBlocks(restoredBlocks);
       setElements(data.elements || []);
       setStepOutline(data.stepOutline || []);
+      setCharacterBible(data.characterBible || []);
       setFocusedId(restoredBlocks[0].id);
       if (data.savedAt) setLastSaved(data.savedAt);
       setLoaded(true);
@@ -1384,20 +1408,20 @@ export default function ScreenplayEditor() {
     autosaveTimer.current = setTimeout(() => {
       const savedAt = new Date().toISOString();
       if (appPassword && currentScriptId) {
-        saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, savedAt }).then((ok) => {
+        saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, savedAt }).then((ok) => {
           if (ok) {
             setLastSaved(savedAt);
             setScriptList((prev) => prev.map((s) => (s.id === currentScriptId ? { ...s, title, updatedAt: savedAt } : s)));
           }
         });
       } else {
-        saveScriptData({ title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, savedAt }).then((ok) => {
+        saveScriptData({ title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, savedAt }).then((ok) => {
           if (ok) setLastSaved(savedAt);
         });
       }
     }, 800);
     return () => clearTimeout(autosaveTimer.current);
-  }, [blocks, title, author, credit, basedOn, draftDate, contact, elements, stepOutline, loaded, authed, appPassword, currentScriptId]);
+  }, [blocks, title, author, credit, basedOn, draftDate, contact, elements, stepOutline, characterBible, loaded, authed, appPassword, currentScriptId]);
 
   useEffect(() => {
     if (!pendingFocus) return;
@@ -1487,6 +1511,11 @@ export default function ScreenplayEditor() {
     });
     return Array.from(set).sort();
   }, [blocks]);
+
+  const charactersNotInBible = useMemo(() => {
+    const existing = new Set(characterBible.map((e) => e.name.trim().toUpperCase()));
+    return knownCharacterNames.filter((n) => !existing.has(n.toUpperCase()));
+  }, [knownCharacterNames, characterBible]);
 
   const knownSceneHeadings = useMemo(() => {
     const set = new Set();
@@ -1710,6 +1739,55 @@ export default function ScreenplayEditor() {
       arr.splice(idx, 0, moved);
       return arr;
     });
+  };
+
+  const handleAddBibleEntry = (name = "") => {
+    setCharacterBible((prev) => [...prev, { id: newId(), name, age: "", description: "", arc: "" }]);
+  };
+
+  const handleUpdateBibleEntry = (id, field, value) => {
+    setCharacterBible((prev) => prev.map((entry) => (entry.id === id ? { ...entry, [field]: value } : entry)));
+  };
+
+  const handleDeleteBibleEntry = (id) => {
+    setCharacterBible((prev) => prev.filter((entry) => entry.id !== id));
+  };
+
+  const handleBibleDragStart = (e, idx) => {
+    bibleDragIndexRef.current = idx;
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleBibleDragOver = (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const handleBibleDrop = (e, idx) => {
+    e.preventDefault();
+    const from = bibleDragIndexRef.current;
+    bibleDragIndexRef.current = null;
+    if (from === null || from === idx) return;
+    setCharacterBible((prev) => {
+      const arr = [...prev];
+      const [moved] = arr.splice(from, 1);
+      arr.splice(idx, 0, moved);
+      return arr;
+    });
+  };
+
+  const handleExportCharacterBible = () => {
+    const text = generateCharacterBibleText(characterBible, title);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    a.href = url;
+    a.download = `${safe}_character_bible.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const markElement = (blockId, start, end, category) => {
@@ -1944,8 +2022,9 @@ export default function ScreenplayEditor() {
     setContact("");
     setElements([]);
     setStepOutline([]);
+    setCharacterBible([]);
     setPendingFocus({ id, pos: "start" });
-    saveScriptData({ title: "Untitled Screenplay", author: "", credit: "Written by", basedOn: "", draftDate: "", contact: "", blocks: blank, elements: [], stepOutline: [], savedAt: new Date().toISOString() });
+    saveScriptData({ title: "Untitled Screenplay", author: "", credit: "Written by", basedOn: "", draftDate: "", contact: "", blocks: blank, elements: [], stepOutline: [], characterBible: [], savedAt: new Date().toISOString() });
   };
 
   const handleSave = () => {
@@ -2002,7 +2081,7 @@ export default function ScreenplayEditor() {
       setBlocks(b);
       setPendingFocus({ id: b[0].id, pos: "start" });
       const savedAt = new Date().toISOString();
-      const payload = { title: newTitle, author: a || "", credit: c || "Written by", basedOn: bo || "", draftDate: dd || "", contact: ct || "", blocks: b, elements, stepOutline, savedAt };
+      const payload = { title: newTitle, author: a || "", credit: c || "Written by", basedOn: bo || "", draftDate: dd || "", contact: ct || "", blocks: b, elements, stepOutline, characterBible, savedAt };
       if (appPassword && currentScriptId) {
         saveCloudScript(appPassword, currentScriptId, payload).then((ok) => {
           if (ok) setLastSaved(savedAt);
@@ -2194,12 +2273,12 @@ export default function ScreenplayEditor() {
             {!pickerLoading && scriptList.length === 0 && !pickerError && (
               <div style={{ color: mutedColor, fontSize: "13px" }}>No scripts yet — create your first one above.</div>
             )}
-            <div style={{ maxHeight: "50vh", overflowY: "auto" }}>
+            <div style={{ maxHeight: "50vh", overflowY: "auto", padding: "2px" }}>
               {scriptList.map((s) => (
-                <div key={s.id} onClick={() => handleOpenScript(s.id)} style={styles.scriptRow}>
+                <div key={s.id} onClick={() => handleOpenScript(s.id)} style={styles.scriptRow} className="script-row">
                   <div>
-                    <div style={{ fontWeight: 700, fontSize: "13px" }}>{s.title || "Untitled Screenplay"}</div>
-                    <div style={{ fontSize: "11px", color: mutedColor }}>
+                    <div style={{ fontWeight: 700, fontSize: "13.5px" }}>{s.title || "Untitled Screenplay"}</div>
+                    <div style={{ fontSize: "11px", color: mutedColor, marginTop: "3px" }}>
                       {s.updatedAt ? new Date(s.updatedAt).toLocaleString() : ""}
                     </div>
                   </div>
@@ -2262,6 +2341,7 @@ export default function ScreenplayEditor() {
             { label: "Script View", checkbox: viewMode === "script", onClick: () => setViewMode("script") },
             { label: "Corkboard", checkbox: viewMode === "corkboard", onClick: () => setViewMode((v) => (v === "corkboard" ? "script" : "corkboard")) },
             { label: "Outline", checkbox: viewMode === "outline", onClick: () => setViewMode((v) => (v === "outline" ? "script" : "outline")) },
+            { label: "Character Bible", checkbox: viewMode === "bible", onClick: () => setViewMode((v) => (v === "bible" ? "script" : "bible")) },
             { label: railCollapsed ? "Expand Left Panel" : "Collapse Left Panel", onClick: () => setRailCollapsed((v) => !v) },
             { label: sceneListCollapsed ? "Show Scene List" : "Hide Scene List", checkbox: !sceneListCollapsed, onClick: () => setSceneListCollapsed((v) => !v) },
             { divider: true },
@@ -2492,6 +2572,75 @@ export default function ScreenplayEditor() {
               ))}
             </div>
           </div>
+        ) : viewMode === "bible" ? (
+          /* Character bible — narrative notes per character, distinct
+             from the Elements tracker (which is about capitalization). */
+          <div style={styles.corkboardWrap} className="no-print">
+            <div style={styles.outlineList}>
+              <div style={{ display: "flex", gap: "8px", marginBottom: "12px", flexWrap: "wrap" }}>
+                <button style={styles.btnPrimary} onClick={() => handleAddBibleEntry()}>+ Add Character</button>
+                <button style={styles.btn} onClick={handleExportCharacterBible} disabled={characterBible.length === 0}>
+                  Export Bible
+                </button>
+              </div>
+              {charactersNotInBible.length > 0 && (
+                <div style={{ marginBottom: "16px" }}>
+                  <div style={styles.railLabel}>Add From Script</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "6px" }}>
+                    {charactersNotInBible.map((name) => (
+                      <button key={name} style={{ ...styles.railBtn, width: "auto", fontSize: "11px" }} onClick={() => handleAddBibleEntry(name)}>
+                        + {name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {characterBible.length === 0 && (
+                <div style={{ color: mutedColor, fontSize: "13px" }}>No characters yet — add one above.</div>
+              )}
+              {characterBible.map((entry, idx) => (
+                <div
+                  key={entry.id}
+                  style={styles.outlineEntry}
+                  draggable
+                  onDragStart={(e) => handleBibleDragStart(e, idx)}
+                  onDragOver={handleBibleDragOver}
+                  onDrop={(e) => handleBibleDrop(e, idx)}
+                >
+                  <div style={styles.outlineEntryHeader}>
+                    <input
+                      style={styles.outlineHeadingInput}
+                      value={entry.name}
+                      placeholder="Character name"
+                      onChange={(e) => handleUpdateBibleEntry(entry.id, "name", e.target.value)}
+                    />
+                    <input
+                      style={{ ...styles.outlineHeadingInput, flex: "0 0 70px", fontWeight: 400 }}
+                      value={entry.age}
+                      placeholder="Age"
+                      onChange={(e) => handleUpdateBibleEntry(entry.id, "age", e.target.value)}
+                    />
+                    <button style={styles.elementRemove} onClick={() => handleDeleteBibleEntry(entry.id)} title="Delete">×</button>
+                  </div>
+                  <textarea
+                    style={styles.outlineBodyInput}
+                    value={entry.description}
+                    placeholder="Description — appearance, personality…"
+                    onChange={(e) => handleUpdateBibleEntry(entry.id, "description", e.target.value)}
+                    rows={2}
+                  />
+                  <div style={{ ...styles.railLabel, marginTop: "8px" }}>Arc / Notes</div>
+                  <textarea
+                    style={styles.outlineBodyInput}
+                    value={entry.arc}
+                    placeholder="Where they start, where they end up…"
+                    onChange={(e) => handleUpdateBibleEntry(entry.id, "arc", e.target.value)}
+                    rows={2}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
         ) : (
         /* Page */
         <div style={styles.pageWrap}>
@@ -2581,6 +2730,8 @@ export default function ScreenplayEditor() {
           <span style={styles.statusPill}>Corkboard</span>
         ) : viewMode === "outline" ? (
           <span style={styles.statusPill}>Outline</span>
+        ) : viewMode === "bible" ? (
+          <span style={styles.statusPill}>Character Bible</span>
         ) : (
           <span style={styles.statusPill}>{LABELS[focusedType]}</span>
         )}
@@ -2589,6 +2740,8 @@ export default function ScreenplayEditor() {
             ? `${sceneUnits.filter((u) => u.headingId !== null).length} scenes · drag cards to reorder`
             : viewMode === "outline"
             ? `${stepOutline.length} outline entr${stepOutline.length === 1 ? "y" : "ies"} · drag to reorder`
+            : viewMode === "bible"
+            ? `${characterBible.length} character${characterBible.length === 1 ? "" : "s"} · drag to reorder`
             : `${wordCount} words · ~${pageEstimate} page${pageEstimate === 1 ? "" : "s"}`}
           {lastSaved ? ` · Saved ${new Date(lastSaved).toLocaleTimeString()}` : ""}
           {authed ? (appPassword ? " · Cloud sync on" : " · Local only") : ""}
@@ -2939,6 +3092,12 @@ const THEMES = [
   { id: "slate", name: "Slate Light", ink: "#eef1f4", paper: "#ffffff", text: "#1f2937", gold: "#2f6fed" },
   { id: "rosequartz", name: "Rose Quartz", ink: "#faf0f2", paper: "#fffbfc", text: "#3a2027", gold: "#c0607a" },
   { id: "mint", name: "Mint", ink: "#eefaf3", paper: "#ffffff", text: "#123324", gold: "#2f9e6a" },
+  { id: "amber", name: "Amber Terminal", ink: "#0d0f0a", paper: "#f7f3e8", text: "#e8dcc0", gold: "#ffb020" },
+  { id: "violet", name: "Deep Purple", ink: "#1a1025", paper: "#f8f5fc", text: "#e5daf0", gold: "#a78bfa" },
+  { id: "ocean", name: "Ocean", ink: "#0a1f2e", paper: "#f4fafc", text: "#d5eef0", gold: "#4fd1c5" },
+  { id: "steel", name: "Charcoal Steel", ink: "#1e1e1e", paper: "#fafafa", text: "#e8e8e8", gold: "#8fa8c4" },
+  { id: "sand", name: "Sand", ink: "#f0e6d6", paper: "#fffbf5", text: "#3a2d1c", gold: "#c17a3f" },
+  { id: "lavender", name: "Lavender", ink: "#f5f0fa", paper: "#ffffff", text: "#2e2438", gold: "#8b6dc4" },
 ];
 
 const DEFAULT_THEME = THEMES[0];
@@ -3412,9 +3571,13 @@ function buildStyles(t) {
       display: "flex",
       justifyContent: "space-between",
       alignItems: "center",
-      padding: "10px 8px",
-      borderBottom: `1px solid ${line}`,
+      padding: "14px",
+      marginBottom: "10px",
+      borderRadius: "6px",
+      border: `1px solid ${line}`,
+      background: mix(t.ink, t.text, 0.05),
       cursor: "pointer",
+      transition: "background 0.12s ease, border-color 0.12s ease",
     },
     findBar: {
       display: "flex",
@@ -3449,6 +3612,7 @@ function buildGlobalCss(t) {
   ::-webkit-scrollbar-track { background: ${t.ink}; }
   ::-webkit-scrollbar-thumb { background: ${line}; border-radius: 5px; }
   input[type="color"] { width: 36px; height: 26px; border: none; border-radius: 4px; padding: 0; background: transparent; cursor: pointer; }
+  .script-row:hover { background: ${mix(t.ink, t.text, 0.11)} !important; border-color: ${t.gold} !important; }
   @media print {
     .no-print { display: none !important; }
     body, html { background: white !important; }
