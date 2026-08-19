@@ -787,6 +787,28 @@ function findMatches(blocks, query) {
 }
 
 /* ---------------------------------------------------------------
+   Table read — assigns each character a consistent voice (from
+   whatever the browser's speechSynthesis exposes) so the same
+   character sounds the same throughout a read, narrator voice for
+   scene headings/action. voiceMap is mutated in place so
+   assignments persist across the whole session, not just one read.
+--------------------------------------------------------------- */
+function getVoiceForCharacter(name, voices, voiceMap) {
+  if (voiceMap[name]) return voiceMap[name];
+  if (voices.length === 0) return null;
+  const used = new Set(Object.values(voiceMap).map((v) => v?.name));
+  const available = voices.filter((v) => !used.has(v.name));
+  const pool = available.length > 0 ? available : voices;
+  const voice = pool[Object.keys(voiceMap).length % pool.length] || voices[0];
+  voiceMap[name] = voice;
+  return voice;
+}
+
+function characterNameFor(text) {
+  return text.replace(/\s*\^\s*$/, "").replace(/\s*\([^()]*\)\s*$/, "").trim();
+}
+
+/* ---------------------------------------------------------------
    Groups blocks for rendering: pairs a Character marked "dual"
    with the immediately preceding character+dialogue group so they
    can render as two side-by-side columns.
@@ -971,6 +993,9 @@ export default function ScreenplayEditor() {
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [elements, setElements] = useState([]);
   const [stepOutline, setStepOutline] = useState([]);
+  const [availableVoices, setAvailableVoices] = useState([]);
+  const [isReading, setIsReading] = useState(false);
+  const [readingBlockId, setReadingBlockId] = useState(null);
   const [activeSelection, setActiveSelection] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [showReportsPanel, setShowReportsPanel] = useState(false);
@@ -1007,6 +1032,10 @@ export default function ScreenplayEditor() {
   const dragIndexRef = useRef(null);
   const justDraggedRef = useRef(false);
   const outlineDragIndexRef = useRef(null);
+  const voiceMapRef = useRef({});
+  const narratorVoiceRef = useRef(null);
+  const readQueueRef = useRef([]);
+  const readIndexRef = useRef(0);
   const prevBlocksRef = useRef(null);
   const historyBaseRef = useRef(null);
   const historyTimerRef = useRef(null);
@@ -1112,6 +1141,23 @@ export default function ScreenplayEditor() {
       // ignore
     }
   }, [theme]);
+
+  // Load available text-to-speech voices (some browsers load this async).
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    const loadVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length) {
+        setAvailableVoices(voices);
+        if (!narratorVoiceRef.current) narratorVoiceRef.current = voices[0];
+      }
+    };
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
 
   // Load/persist small display preferences (scene numbers etc).
   useEffect(() => {
@@ -1696,18 +1742,101 @@ export default function ScreenplayEditor() {
   };
 
   const handleSelect = (e, block) => {
-    if (block.type !== "action") return;
     const { selectionStart: s, selectionEnd: en } = e.target;
     if (s !== en) setActiveSelection({ blockId: block.id, start: s, end: en });
     else if (activeSelection?.blockId === block.id) setActiveSelection(null);
   };
 
   const handleContextMenu = (e, block) => {
-    if (block.type !== "action") return;
     const { selectionStart: s, selectionEnd: en } = e.target;
     if (s === en) return; // no selection: allow the browser's normal menu
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, blockId: block.id, start: s, end: en });
+    setContextMenu({ x: e.clientX, y: e.clientY, blockId: block.id, blockType: block.type, start: s, end: en });
+  };
+
+  const resolveVoiceForBlock = (block) => {
+    if (availableVoices.length === 0) return null;
+    let characterName = null;
+    if (block.type === "character") {
+      characterName = characterNameFor(block.text);
+    } else if (block.type === "dialogue" || block.type === "parenthetical") {
+      const idx = blocks.findIndex((b) => b.id === block.id);
+      for (let i = idx - 1; i >= 0; i--) {
+        if (blocks[i].type === "character") {
+          characterName = characterNameFor(blocks[i].text);
+          break;
+        }
+        if (blocks[i].type !== "parenthetical" && blocks[i].type !== "dialogue") break;
+      }
+    }
+    if (characterName) return getVoiceForCharacter(characterName, availableVoices, voiceMapRef.current);
+    return narratorVoiceRef.current || availableVoices[0];
+  };
+
+  const speakNext = () => {
+    const queue = readQueueRef.current;
+    const idx = readIndexRef.current;
+    if (idx >= queue.length) {
+      setIsReading(false);
+      setReadingBlockId(null);
+      return;
+    }
+    const block = queue[idx];
+    setReadingBlockId(block.id);
+    const utter = new SpeechSynthesisUtterance(block.text);
+    const voice = resolveVoiceForBlock(block);
+    if (voice) utter.voice = voice;
+    utter.onend = () => {
+      readIndexRef.current += 1;
+      speakNext();
+    };
+    utter.onerror = () => {
+      readIndexRef.current += 1;
+      speakNext();
+    };
+    window.speechSynthesis.speak(utter);
+  };
+
+  const handleTableRead = (startBlockId) => {
+    if (!("speechSynthesis" in window)) {
+      window.alert("Text-to-speech isn't supported in this browser.");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const startIdx = startBlockId ? Math.max(blocks.findIndex((b) => b.id === startBlockId), 0) : 0;
+    readQueueRef.current = blocks.slice(startIdx).filter((b) => b.text.trim() && ["scene_heading", "action", "dialogue"].includes(b.type));
+    readIndexRef.current = 0;
+    setIsReading(true);
+    speakNext();
+  };
+
+  const handleStopReading = () => {
+    window.speechSynthesis.cancel();
+    setIsReading(false);
+    setReadingBlockId(null);
+  };
+
+  const handleReadAloudSelection = (sel) => {
+    const block = blocks.find((b) => b.id === sel.blockId);
+    setContextMenu(null);
+    if (!block) return;
+    const text = block.text.slice(sel.start, sel.end);
+    if (!text.trim()) return;
+    if (!("speechSynthesis" in window)) {
+      window.alert("Text-to-speech isn't supported in this browser.");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    const voice = resolveVoiceForBlock(block);
+    if (voice) utter.voice = voice;
+    setReadingBlockId(block.id);
+    utter.onstart = () => setIsReading(true);
+    utter.onend = () => {
+      setIsReading(false);
+      setReadingBlockId(null);
+    };
+    window.speechSynthesis.speak(utter);
   };
 
   const handleKeyDown = (e, id) => {
@@ -1936,6 +2065,7 @@ export default function ScreenplayEditor() {
             ...styles.line,
             ...typeStyle,
             fontWeight: b.type === "character" || b.type === "scene_heading" ? 700 : 400,
+            background: b.id === readingBlockId ? `${theme.gold}22` : "transparent",
           }}
         />
         {suggestions.length > 0 && (
@@ -2114,6 +2244,8 @@ export default function ScreenplayEditor() {
             { label: "Corkboard", checkbox: viewMode === "corkboard", onClick: () => setViewMode((v) => (v === "corkboard" ? "script" : "corkboard")) },
             { label: "Outline", checkbox: viewMode === "outline", onClick: () => setViewMode((v) => (v === "outline" ? "script" : "outline")) },
             { label: railCollapsed ? "Expand Left Panel" : "Collapse Left Panel", onClick: () => setRailCollapsed((v) => !v) },
+            { divider: true },
+            { label: isReading ? "Stop Reading" : "Table Read (from top)", onClick: isReading ? handleStopReading : () => handleTableRead(null) },
           ])}
           {renderMenu("reports", "Reports", [
             { label: "Scene Report", onClick: () => { setReportsTab("scenes"); setShowReportsPanel(true); } },
@@ -2399,20 +2531,44 @@ export default function ScreenplayEditor() {
         </span>
       </div>
 
+      {isReading && (
+        <div style={styles.readingIndicator} className="no-print">
+          <span>🔊 Reading…</span>
+          <button style={styles.btn} onClick={handleStopReading}>Stop</button>
+        </div>
+      )}
+
       {/* Right-click mark menu */}
       {contextMenu && (
         <>
           <div style={styles.overlay} className="no-print" onClick={() => setContextMenu(null)} />
           <div style={{ ...styles.contextMenu, left: contextMenu.x, top: contextMenu.y }} className="no-print">
-            {Object.entries(CATEGORIES).map(([cat, label]) => (
-              <button
-                key={cat}
-                style={styles.contextMenuBtn}
-                onClick={() => markElement(contextMenu.blockId, contextMenu.start, contextMenu.end, cat)}
-              >
-                Mark as {label}
-              </button>
-            ))}
+            <button style={styles.contextMenuBtn} onClick={() => handleReadAloudSelection(contextMenu)}>
+              🔊 Read Aloud
+            </button>
+            <button
+              style={styles.contextMenuBtn}
+              onClick={() => {
+                handleTableRead(contextMenu.blockId);
+                setContextMenu(null);
+              }}
+            >
+              ▶ Table Read From Here
+            </button>
+            {contextMenu.blockType === "action" && (
+              <>
+                <div style={styles.menuDivider} />
+                {Object.entries(CATEGORIES).map(([cat, label]) => (
+                  <button
+                    key={cat}
+                    style={styles.contextMenuBtn}
+                    onClick={() => markElement(contextMenu.blockId, contextMenu.start, contextMenu.end, cat)}
+                  >
+                    Mark as {label}
+                  </button>
+                ))}
+              </>
+            )}
           </div>
         </>
       )}
@@ -3099,6 +3255,22 @@ function buildStyles(t) {
       outline: "none",
       resize: "vertical",
       fontFamily: "inherit",
+    },
+    readingIndicator: {
+      position: "fixed",
+      bottom: "20px",
+      right: "20px",
+      zIndex: 70,
+      display: "flex",
+      alignItems: "center",
+      gap: "10px",
+      background: t.ink,
+      border: `1px solid ${t.gold}`,
+      borderRadius: "20px",
+      padding: "8px 14px",
+      fontSize: "12.5px",
+      color: t.text,
+      boxShadow: "0 6px 20px rgba(0,0,0,0.4)",
     },
     statRow: { marginBottom: "12px" },
     statBarTrack: { height: "6px", background: line, borderRadius: "3px", marginTop: "4px", overflow: "hidden" },
