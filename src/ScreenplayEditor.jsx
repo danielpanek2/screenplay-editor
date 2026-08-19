@@ -991,6 +991,7 @@ export default function ScreenplayEditor() {
   const [focusedId, setFocusedId] = useState(blocks[0].id);
   const [pendingFocus, setPendingFocus] = useState(null);
   const [railCollapsed, setRailCollapsed] = useState(false);
+  const [sceneListCollapsed, setSceneListCollapsed] = useState(false);
   const [elements, setElements] = useState([]);
   const [stepOutline, setStepOutline] = useState([]);
   const [availableVoices, setAvailableVoices] = useState([]);
@@ -2029,12 +2030,15 @@ export default function ScreenplayEditor() {
   const styles = useMemo(() => buildStyles(theme), [theme]);
   const globalCss = useMemo(() => buildGlobalCss(theme), [theme]);
   const mutedColor = useMemo(() => mix(theme.ink, theme.text, 0.55), [theme]);
+  const lineColor = useMemo(() => mix(theme.ink, theme.text, 0.14), [theme]);
+  const sceneHeadingColor = useMemo(() => mix(theme.gold, "#1a1a1a", 0.35), [theme]);
 
   const renderField = (b, dualMode = false) => {
     const isFocused = b.id === focusedId;
     const suggestions = isFocused ? getSuggestionsFor(b) : [];
     const typeStyle = dualMode ? { width: "100%", marginLeft: "0" } : TYPE_STYLE[b.type];
     const sceneNum = !dualMode && b.type === "scene_heading" ? sceneNumberMap[b.id] : null;
+    const missingTOD = b.type === "scene_heading" && b.text.trim() && !parseSceneHeadingParts(b.text).timeOfDay;
     return (
       <div key={b.id} style={{ position: "relative" }}>
         {showSceneNumbers && sceneNum && (
@@ -2043,10 +2047,14 @@ export default function ScreenplayEditor() {
             <span style={{ ...styles.sceneNumberBadge, right: "-0.65in" }}>{sceneNum}</span>
           </>
         )}
+        {missingTOD && (
+          <span style={styles.todWarning} title="No DAY/NIGHT (or other time cue) specified">⚠ DAY/NIGHT?</span>
+        )}
         <textarea
           ref={(el) => (textRefs.current[b.id] = el)}
           value={b.text}
           placeholder={PLACEHOLDER[b.type]}
+          className={b.type === "scene_heading" ? "scene-heading-field" : undefined}
           onFocus={() => {
             setFocusedId(b.id);
             setSuggestIndex(-1);
@@ -2065,6 +2073,7 @@ export default function ScreenplayEditor() {
             ...styles.line,
             ...typeStyle,
             fontWeight: b.type === "character" || b.type === "scene_heading" ? 700 : 400,
+            color: b.type === "scene_heading" ? sceneHeadingColor : styles.line.color,
             background: b.id === readingBlockId ? `${theme.gold}22` : "transparent",
           }}
         />
@@ -2244,6 +2253,7 @@ export default function ScreenplayEditor() {
             { label: "Corkboard", checkbox: viewMode === "corkboard", onClick: () => setViewMode((v) => (v === "corkboard" ? "script" : "corkboard")) },
             { label: "Outline", checkbox: viewMode === "outline", onClick: () => setViewMode((v) => (v === "outline" ? "script" : "outline")) },
             { label: railCollapsed ? "Expand Left Panel" : "Collapse Left Panel", onClick: () => setRailCollapsed((v) => !v) },
+            { label: sceneListCollapsed ? "Show Scene List" : "Hide Scene List", checkbox: !sceneListCollapsed, onClick: () => setSceneListCollapsed((v) => !v) },
             { divider: true },
             { label: isReading ? "Stop Reading" : "Table Read (from top)", onClick: isReading ? handleStopReading : () => handleTableRead(null) },
           ])}
@@ -2508,6 +2518,50 @@ export default function ScreenplayEditor() {
             })}
           </div>
         </div>
+        )}
+
+        {/* Right-side scene list */}
+        {viewMode === "script" && (
+          <div
+            style={{
+              ...styles.rail,
+              ...(sceneListCollapsed ? styles.railCollapsed : {}),
+              borderRight: "none",
+              borderLeft: `1px solid ${lineColor}`,
+            }}
+            className="no-print"
+          >
+            <button
+              style={styles.railToggle}
+              onClick={() => setSceneListCollapsed((c) => !c)}
+              title={sceneListCollapsed ? "Expand panel" : "Collapse panel"}
+            >
+              {sceneListCollapsed ? "«" : "Collapse »"}
+            </button>
+            {!sceneListCollapsed && <div style={styles.railLabel}>Scenes</div>}
+            {blocks
+              .filter((b) => b.type === "scene_heading")
+              .map((b) => {
+                const num = sceneNumberMap[b.id];
+                return (
+                  <button
+                    key={b.id}
+                    onClick={() => setPendingFocus({ id: b.id, pos: "start" })}
+                    title={b.text.trim() || "(untitled scene)"}
+                    style={{
+                      ...styles.railBtn,
+                      ...(sceneListCollapsed ? styles.railBtnCollapsed : {}),
+                      textAlign: "left",
+                      whiteSpace: sceneListCollapsed ? "nowrap" : "normal",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {sceneListCollapsed ? num || "•" : `${num ? num + ". " : ""}${b.text.trim() || "(untitled)"}`}
+                  </button>
+                );
+              })}
+          </div>
         )}
       </div>
 
@@ -3283,6 +3337,18 @@ function buildStyles(t) {
       lineHeight: 1,
       color: "#1a1a1a",
     },
+    todWarning: {
+      position: "absolute",
+      top: "2px",
+      right: "2px",
+      fontSize: "10px",
+      color: "#c9812f",
+      fontWeight: 700,
+      cursor: "help",
+      background: "rgba(255,255,255,0.85)",
+      padding: "0 3px",
+      borderRadius: "2px",
+    },
     authWrap: {
       flex: 1,
       display: "flex",
@@ -3377,6 +3443,7 @@ function buildGlobalCss(t) {
     .no-print { display: none !important; }
     body, html { background: white !important; }
     .print-page { box-shadow: none !important; margin: 0 !important; }
+    .scene-heading-field { color: #1a1a1a !important; background: transparent !important; }
   }
 `;
 }
