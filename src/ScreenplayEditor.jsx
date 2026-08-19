@@ -1037,6 +1037,7 @@ export default function ScreenplayEditor() {
   const narratorVoiceRef = useRef(null);
   const readQueueRef = useRef([]);
   const readIndexRef = useRef(0);
+  const stoppedRef = useRef(false);
   const prevBlocksRef = useRef(null);
   const historyBaseRef = useRef(null);
   const historyTimerRef = useRef(null);
@@ -1775,6 +1776,7 @@ export default function ScreenplayEditor() {
   };
 
   const speakNext = () => {
+    if (stoppedRef.current) return;
     const queue = readQueueRef.current;
     const idx = readIndexRef.current;
     if (idx >= queue.length) {
@@ -1788,10 +1790,12 @@ export default function ScreenplayEditor() {
     const voice = resolveVoiceForBlock(block);
     if (voice) utter.voice = voice;
     utter.onend = () => {
+      if (stoppedRef.current) return;
       readIndexRef.current += 1;
       speakNext();
     };
     utter.onerror = () => {
+      if (stoppedRef.current) return;
       readIndexRef.current += 1;
       speakNext();
     };
@@ -1803,15 +1807,18 @@ export default function ScreenplayEditor() {
       window.alert("Text-to-speech isn't supported in this browser.");
       return;
     }
+    stoppedRef.current = true; // swallow the onend from any read already in progress
     window.speechSynthesis.cancel();
     const startIdx = startBlockId ? Math.max(blocks.findIndex((b) => b.id === startBlockId), 0) : 0;
     readQueueRef.current = blocks.slice(startIdx).filter((b) => b.text.trim() && ["scene_heading", "action", "dialogue"].includes(b.type));
     readIndexRef.current = 0;
+    stoppedRef.current = false;
     setIsReading(true);
     speakNext();
   };
 
   const handleStopReading = () => {
+    stoppedRef.current = true;
     window.speechSynthesis.cancel();
     setIsReading(false);
     setReadingBlockId(null);
@@ -1827,13 +1834,16 @@ export default function ScreenplayEditor() {
       window.alert("Text-to-speech isn't supported in this browser.");
       return;
     }
+    stoppedRef.current = true;
     window.speechSynthesis.cancel();
+    stoppedRef.current = false;
     const utter = new SpeechSynthesisUtterance(text);
     const voice = resolveVoiceForBlock(block);
     if (voice) utter.voice = voice;
     setReadingBlockId(block.id);
     utter.onstart = () => setIsReading(true);
     utter.onend = () => {
+      if (stoppedRef.current) return;
       setIsReading(false);
       setReadingBlockId(null);
     };
