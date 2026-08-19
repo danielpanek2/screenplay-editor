@@ -2200,6 +2200,8 @@ export default function ScreenplayEditor() {
             {items.map((it, i) =>
               it.divider ? (
                 <div key={i} style={styles.menuDivider} />
+              ) : it.header ? (
+                <div key={i} style={styles.menuSectionLabel}>{it.header}</div>
               ) : (
                 <button
                   key={i}
@@ -2337,13 +2339,16 @@ export default function ScreenplayEditor() {
           {renderMenu("view", "View", [
             { label: "Appearance / Theme…", onClick: () => setShowAppearance(true) },
             { divider: true },
-            { label: "Scene Numbers", checkbox: showSceneNumbers, onClick: () => setShowSceneNumbers((v) => !v) },
+            { header: "Switch View" },
             { label: "Script View", checkbox: viewMode === "script", onClick: () => setViewMode("script") },
             { label: "Corkboard", checkbox: viewMode === "corkboard", onClick: () => setViewMode((v) => (v === "corkboard" ? "script" : "corkboard")) },
             { label: "Outline", checkbox: viewMode === "outline", onClick: () => setViewMode((v) => (v === "outline" ? "script" : "outline")) },
             { label: "Character Bible", checkbox: viewMode === "bible", onClick: () => setViewMode((v) => (v === "bible" ? "script" : "bible")) },
-            { label: railCollapsed ? "Expand Left Panel" : "Collapse Left Panel", onClick: () => setRailCollapsed((v) => !v) },
+            { divider: true },
+            { header: "View Aids" },
+            { label: "Scene Numbers", checkbox: showSceneNumbers, onClick: () => setShowSceneNumbers((v) => !v) },
             { label: sceneListCollapsed ? "Show Scene List" : "Hide Scene List", checkbox: !sceneListCollapsed, onClick: () => setSceneListCollapsed((v) => !v) },
+            { label: railCollapsed ? "Expand Left Panel" : "Collapse Left Panel", onClick: () => setRailCollapsed((v) => !v) },
             { divider: true },
             { label: isReading ? "Stop Reading" : "Table Read (from top)", onClick: isReading ? handleStopReading : () => handleTableRead(null) },
           ])}
@@ -3086,16 +3091,16 @@ const THEMES = [
   { id: "noir", name: "Noir", ink: "#121212", paper: "#fafafa", text: "#eeeeee", gold: "#c9c9c9" },
   { id: "crimson", name: "Crimson Draft", ink: "#241012", paper: "#fbf5f4", text: "#f3e3e1", gold: "#c8555f" },
   { id: "forest", name: "Forest", ink: "#0f1f17", paper: "#f6faf6", text: "#e3eee4", gold: "#82b384" },
+  { id: "amber", name: "Amber Terminal", ink: "#0d0f0a", paper: "#f7f3e8", text: "#e8dcc0", gold: "#ffb020" },
+  { id: "violet", name: "Deep Purple", ink: "#1a1025", paper: "#f8f5fc", text: "#e5daf0", gold: "#a78bfa" },
+  { id: "ocean", name: "Ocean", ink: "#0a1f2e", paper: "#f4fafc", text: "#d5eef0", gold: "#4fd1c5" },
+  { id: "steel", name: "Charcoal Steel", ink: "#1e1e1e", paper: "#fafafa", text: "#e8e8e8", gold: "#8fa8c4" },
   { id: "studio", name: "Light Studio", ink: "#f2efe7", paper: "#ffffff", text: "#2a251d", gold: "#b5651d" },
   { id: "paperwhite", name: "Paper White", ink: "#ffffff", paper: "#fdfdfd", text: "#232323", gold: "#3b6ea5" },
   { id: "sepia", name: "Sepia", ink: "#f4ecd8", paper: "#fffdf6", text: "#3b2f1e", gold: "#8a6d3b" },
   { id: "slate", name: "Slate Light", ink: "#eef1f4", paper: "#ffffff", text: "#1f2937", gold: "#2f6fed" },
   { id: "rosequartz", name: "Rose Quartz", ink: "#faf0f2", paper: "#fffbfc", text: "#3a2027", gold: "#c0607a" },
   { id: "mint", name: "Mint", ink: "#eefaf3", paper: "#ffffff", text: "#123324", gold: "#2f9e6a" },
-  { id: "amber", name: "Amber Terminal", ink: "#0d0f0a", paper: "#f7f3e8", text: "#e8dcc0", gold: "#ffb020" },
-  { id: "violet", name: "Deep Purple", ink: "#1a1025", paper: "#f8f5fc", text: "#e5daf0", gold: "#a78bfa" },
-  { id: "ocean", name: "Ocean", ink: "#0a1f2e", paper: "#f4fafc", text: "#d5eef0", gold: "#4fd1c5" },
-  { id: "steel", name: "Charcoal Steel", ink: "#1e1e1e", paper: "#fafafa", text: "#e8e8e8", gold: "#8fa8c4" },
   { id: "sand", name: "Sand", ink: "#f0e6d6", paper: "#fffbf5", text: "#3a2d1c", gold: "#c17a3f" },
   { id: "lavender", name: "Lavender", ink: "#f5f0fa", paper: "#ffffff", text: "#2e2438", gold: "#8b6dc4" },
 ];
@@ -3400,6 +3405,13 @@ function buildStyles(t) {
       width: "100%",
     },
     menuDivider: { height: "1px", background: line, margin: "4px 2px" },
+    menuSectionLabel: {
+      fontSize: "10px",
+      letterSpacing: "1px",
+      textTransform: "uppercase",
+      color: mute,
+      padding: "8px 10px 2px",
+    },
     checkbox: { width: "14px", display: "inline-block", color: t.gold, fontWeight: 700 },
     tabRow: {
       display: "flex",
