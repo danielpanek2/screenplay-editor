@@ -3005,9 +3005,9 @@ function buildStyles(t) {
     },
     body: { flex: 1, display: "flex", overflow: "hidden" },
     rail: {
-      width: "168px",
+      width: "150px",
       borderRight: `1px solid ${line}`,
-      padding: "16px 10px",
+      padding: "16px 8px",
       display: "flex",
       flexDirection: "column",
       gap: "6px",
@@ -3016,7 +3016,7 @@ function buildStyles(t) {
       flexShrink: 0,
       transition: "width 0.15s ease",
     },
-    railCollapsed: { width: "48px", padding: "16px 6px", alignItems: "center" },
+    railCollapsed: { width: "44px", padding: "16px 5px", alignItems: "center" },
     railToggle: {
       background: "transparent",
       border: `1px solid ${line}`,
@@ -3043,7 +3043,7 @@ function buildStyles(t) {
     railBtnCollapsed: { textAlign: "center", padding: "8px 0", fontWeight: 700 },
     railBtnActive: { background: t.gold, color: t.ink, border: `1px solid ${t.gold}`, fontWeight: 700 },
     railHint: { marginTop: "18px", fontSize: "10.5px", color: mute, lineHeight: 1.8, paddingLeft: "4px" },
-    pageWrap: { flex: 1, overflowY: "auto", padding: "32px 24px", display: "flex", justifyContent: "center" },
+    pageWrap: { flex: 1, overflowY: "auto", padding: "24px 8px", display: "flex", justifyContent: "center" },
     page: {
       background: t.paper,
       color: "#1a1a1a",
