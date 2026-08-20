@@ -469,6 +469,30 @@ const CATEGORIES = {
   sound: "Sound Cue",
 };
 
+/* ---------------------------------------------------------------
+   Word Association — Datamuse (api.datamuse.com), free, no API key.
+   Relation codes per https://www.datamuse.com/api/
+--------------------------------------------------------------- */
+const WORD_ASSOC_RELATIONS = [
+  { code: "rel_syn", label: "Synonyms" },
+  { code: "rel_ant", label: "Antonyms" },
+  { code: "rel_trg", label: "Related Words" },
+  { code: "rel_gen", label: "More General" },
+  { code: "rel_spc", label: "More Specific" },
+  { code: "rel_rhy", label: "Rhymes" },
+];
+
+async function fetchWordAssociations(word, relCode) {
+  try {
+    const res = await fetch(`https://api.datamuse.com/words?${relCode}=${encodeURIComponent(word)}&max=12`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.map((d) => d.word);
+  } catch (e) {
+    return [];
+  }
+}
+
 function generateElementsReport(elements, title) {
   const out = [];
   out.push(`# Element Report${title.trim() ? " — " + title.trim() : ""}`);
@@ -1020,6 +1044,11 @@ export default function ScreenplayEditor() {
   const [readingBlockId, setReadingBlockId] = useState(null);
   const [activeSelection, setActiveSelection] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
+  const [wordAssocStage, setWordAssocStage] = useState(null); // null | "relations" | "results"
+  const [wordAssocRelation, setWordAssocRelation] = useState(null);
+  const [wordAssocResults, setWordAssocResults] = useState([]);
+  const [wordAssocLoading, setWordAssocLoading] = useState(false);
+  const [wordAssocError, setWordAssocError] = useState("");
   const [showReportsPanel, setShowReportsPanel] = useState(false);
   const [reportsTab, setReportsTab] = useState("scenes");
   const [suggestIndex, setSuggestIndex] = useState(-1);
@@ -1799,7 +1828,7 @@ export default function ScreenplayEditor() {
     setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, text: newText } : b)));
     setElements((prev) => [...prev, { id: newId(), category, text: selected.trim() }]);
     setActiveSelection(null);
-    setContextMenu(null);
+    closeContextMenu();
     setPendingFocus({ id: blockId, pos: "at", at: end });
   };
 
@@ -1902,9 +1931,46 @@ export default function ScreenplayEditor() {
     setReadingBlockId(null);
   };
 
+  const closeContextMenu = () => {
+    setContextMenu(null);
+    setWordAssocStage(null);
+    setWordAssocRelation(null);
+    setWordAssocResults([]);
+    setWordAssocError("");
+  };
+
+  const handleWordAssocRelation = async (relCode, relLabel) => {
+    if (!contextMenu) return;
+    const block = blocks.find((b) => b.id === contextMenu.blockId);
+    if (!block) return;
+    const word = block.text.slice(contextMenu.start, contextMenu.end).trim();
+    setWordAssocRelation(relLabel);
+    setWordAssocStage("results");
+    setWordAssocLoading(true);
+    setWordAssocError("");
+    setWordAssocResults([]);
+    const results = await fetchWordAssociations(word, relCode);
+    setWordAssocLoading(false);
+    if (results.length === 0) setWordAssocError("No results found.");
+    setWordAssocResults(results);
+  };
+
+  const handleApplyWordAssoc = (word) => {
+    if (!contextMenu) return;
+    const { blockId, start, end } = contextMenu;
+    setBlocks((prev) =>
+      prev.map((b) => {
+        if (b.id !== blockId) return b;
+        const newText = b.text.slice(0, start) + word + b.text.slice(end);
+        return { ...b, text: UPPER_TYPES.has(b.type) ? newText.toUpperCase() : newText };
+      })
+    );
+    closeContextMenu();
+  };
+
   const handleReadAloudSelection = (sel) => {
     const block = blocks.find((b) => b.id === sel.blockId);
-    setContextMenu(null);
+    closeContextMenu();
     if (!block) return;
     const text = block.text.slice(sel.start, sel.end);
     if (!text.trim()) return;
@@ -2763,32 +2829,71 @@ export default function ScreenplayEditor() {
       {/* Right-click mark menu */}
       {contextMenu && (
         <>
-          <div style={styles.overlay} className="no-print" onClick={() => setContextMenu(null)} />
-          <div style={{ ...styles.contextMenu, left: contextMenu.x, top: contextMenu.y }} className="no-print">
-            <button style={styles.contextMenuBtn} onClick={() => handleReadAloudSelection(contextMenu)}>
-              🔊 Read Aloud
-            </button>
-            <button
-              style={styles.contextMenuBtn}
-              onClick={() => {
-                handleTableRead(contextMenu.blockId);
-                setContextMenu(null);
-              }}
-            >
-              ▶ Table Read From Here
-            </button>
-            {contextMenu.blockType === "action" && (
+          <div style={styles.overlay} className="no-print" onClick={closeContextMenu} />
+          <div style={{ ...styles.contextMenu, left: contextMenu.x, top: contextMenu.y, maxHeight: "320px", overflowY: "auto" }} className="no-print">
+            {wordAssocStage === null && (
               <>
+                <button style={styles.contextMenuBtn} onClick={() => handleReadAloudSelection(contextMenu)}>
+                  🔊 Read Aloud
+                </button>
+                <button
+                  style={styles.contextMenuBtn}
+                  onClick={() => {
+                    handleTableRead(contextMenu.blockId);
+                    closeContextMenu();
+                  }}
+                >
+                  ▶ Table Read From Here
+                </button>
+                <button style={styles.contextMenuBtn} onClick={() => setWordAssocStage("relations")}>
+                  📖 Word Association ›
+                </button>
+                {contextMenu.blockType === "action" && (
+                  <>
+                    <div style={styles.menuDivider} />
+                    {Object.entries(CATEGORIES).map(([cat, label]) => (
+                      <button
+                        key={cat}
+                        style={styles.contextMenuBtn}
+                        onClick={() => markElement(contextMenu.blockId, contextMenu.start, contextMenu.end, cat)}
+                      >
+                        Mark as {label}
+                      </button>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
+
+            {wordAssocStage === "relations" && (
+              <>
+                <button style={styles.contextMenuBtn} onClick={() => setWordAssocStage(null)}>‹ Back</button>
                 <div style={styles.menuDivider} />
-                {Object.entries(CATEGORIES).map(([cat, label]) => (
-                  <button
-                    key={cat}
-                    style={styles.contextMenuBtn}
-                    onClick={() => markElement(contextMenu.blockId, contextMenu.start, contextMenu.end, cat)}
-                  >
-                    Mark as {label}
+                {WORD_ASSOC_RELATIONS.map((r) => (
+                  <button key={r.code} style={styles.contextMenuBtn} onClick={() => handleWordAssocRelation(r.code, r.label)}>
+                    {r.label}
                   </button>
                 ))}
+              </>
+            )}
+
+            {wordAssocStage === "results" && (
+              <>
+                <button style={styles.contextMenuBtn} onClick={() => setWordAssocStage("relations")}>‹ Back</button>
+                <div style={styles.menuDivider} />
+                <div style={styles.menuSectionLabel}>{wordAssocRelation}</div>
+                {wordAssocLoading && (
+                  <div style={{ padding: "8px 10px", fontSize: "12px", color: mutedColor }}>Loading…</div>
+                )}
+                {!wordAssocLoading && wordAssocError && (
+                  <div style={{ padding: "8px 10px", fontSize: "12px", color: mutedColor }}>{wordAssocError}</div>
+                )}
+                {!wordAssocLoading &&
+                  wordAssocResults.map((w) => (
+                    <button key={w} style={styles.contextMenuBtn} onClick={() => handleApplyWordAssoc(w)}>
+                      {w}
+                    </button>
+                  ))}
               </>
             )}
           </div>
