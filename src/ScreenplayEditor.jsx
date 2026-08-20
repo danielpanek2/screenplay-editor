@@ -1156,12 +1156,24 @@ export default function ScreenplayEditor() {
   };
 
   // Global shortcuts: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl+Y redo,
-  // Ctrl/Cmd+F opens Find & Replace — work regardless of focus location.
+  // Ctrl/Cmd+F opens Find & Replace. Undo/redo only take over the script's
+  // own history when focus is on one of the script body fields (or nothing
+  // editable) — if focus is in Title/Author/Find/Title Page/Outline/Bible
+  // fields, the browser's native per-field undo is left alone instead of
+  // being silently overridden.
   useEffect(() => {
     const onKeyDown = (e) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
       const key = e.key.toLowerCase();
+
+      if (key === "z" || key === "y") {
+        const active = document.activeElement;
+        const isScriptField = Object.values(textRefs.current).includes(active);
+        const isOtherEditable = !isScriptField && active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
+        if (isOtherEditable) return; // let the browser handle undo/redo natively here
+      }
+
       if (key === "z" && !e.shiftKey) {
         e.preventDefault();
         handleUndo();
