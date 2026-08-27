@@ -809,6 +809,114 @@ function generateCharacterBibleText(characterBible, title) {
 }
 
 /* ---------------------------------------------------------------
+   Beat sheet templates — pre-fill the free-form Outline with a
+   known story structure's beats as starting placeholders.
+--------------------------------------------------------------- */
+const OUTLINE_TEMPLATES = {
+  saveTheCat: {
+    name: "Save the Cat",
+    beats: [
+      "Opening Image", "Theme Stated", "Set-Up", "Catalyst", "Debate",
+      "Break Into Two", "B Story", "Fun and Games", "Midpoint",
+      "Bad Guys Close In", "All Is Lost", "Dark Night of the Soul",
+      "Break Into Three", "Finale", "Final Image",
+    ],
+  },
+  threeAct: {
+    name: "Three-Act Structure",
+    beats: [
+      "Opening Image / Status Quo", "Inciting Incident", "Plot Point 1 (End of Act 1)",
+      "Rising Action", "Midpoint", "Plot Point 2 (End of Act 2)",
+      "Climax", "Falling Action", "Resolution",
+    ],
+  },
+  herosJourney: {
+    name: "Hero's Journey",
+    beats: [
+      "Ordinary World", "Call to Adventure", "Refusal of the Call", "Meeting the Mentor",
+      "Crossing the Threshold", "Tests, Allies, Enemies", "Approach to the Inmost Cave",
+      "Ordeal", "Reward", "The Road Back", "Resurrection", "Return with the Elixir",
+    ],
+  },
+};
+
+/* ---------------------------------------------------------------
+   Crutch word detector — flags overused non-common words across
+   Action and Dialogue text (excludes stopwords and character names).
+--------------------------------------------------------------- */
+const STOPWORDS = new Set([
+  "the", "and", "for", "are", "was", "were", "been", "being", "have", "has", "had",
+  "having", "this", "that", "these", "those", "with", "from", "into", "onto", "over",
+  "under", "again", "then", "than", "just", "only", "very", "such", "same", "some",
+  "any", "each", "both", "more", "most", "other", "what", "which", "who", "whom",
+  "when", "where", "why", "how", "there", "here", "about", "after", "before",
+  "through", "during", "above", "below", "between", "against", "because", "does",
+  "did", "done", "not", "you", "your", "his", "her", "him", "she", "they", "them",
+  "their", "himself", "herself", "itself", "themselves", "will", "would", "shall",
+  "should", "could", "can", "cant", "dont", "isnt", "wasnt", "arent", "into",
+]);
+
+function computeCrutchWords(blocks, characterNames) {
+  const nameSet = new Set(characterNames.map((n) => n.toLowerCase()));
+  const counts = {};
+  blocks.forEach((b) => {
+    if (b.type !== "action" && b.type !== "dialogue") return;
+    const words = b.text.toLowerCase().match(/[a-z']+/g) || [];
+    words.forEach((w) => {
+      if (w.length < 4) return;
+      if (STOPWORDS.has(w)) return;
+      if (nameSet.has(w)) return;
+      counts[w] = (counts[w] || 0) + 1;
+    });
+  });
+  return Object.entries(counts)
+    .filter(([, n]) => n >= 3)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 25);
+}
+
+function generateCrutchWordsText(crutchWords, title) {
+  const out = [];
+  out.push(`# Word Usage${title.trim() ? " — " + title.trim() : ""}`);
+  out.push("");
+  if (crutchWords.length === 0) {
+    out.push("No notably repeated words found.");
+  } else {
+    out.push("Words repeated 3+ times in Action/Dialogue (excluding common words and character names):");
+    out.push("");
+    crutchWords.forEach(([word, n]) => out.push(`- ${word} — ${n} times`));
+  }
+  return out.join("\n");
+}
+
+/* ---------------------------------------------------------------
+   Weak action-line detector — lightweight heuristics for passive
+   voice, progressive tense, and hedging verbs in Action lines.
+--------------------------------------------------------------- */
+function detectWeakAction(text) {
+  if (/\b(is|are|was|were|be|been|being)\s+[a-z]+ing\b/i.test(text)) {
+    return "Progressive tense — consider a direct action verb";
+  }
+  if (/\b(is|are|was|were|be|been|being)\s+[a-z]+ed\b/i.test(text)) {
+    return "Passive voice — consider who's doing the action";
+  }
+  if (/\b(starts?|begins?|attempts?|tries?)\s+to\b/i.test(text)) {
+    return "Hedging verb — consider the direct action instead";
+  }
+  return null;
+}
+
+/* ---------------------------------------------------------------
+   Writing goals — day-boundary and streak math for the daily
+   word-count tracker.
+--------------------------------------------------------------- */
+function daysBetween(dateStrA, dateStrB) {
+  const a = new Date(dateStrA + "T00:00:00");
+  const b = new Date(dateStrB + "T00:00:00");
+  return Math.round((b - a) / (1000 * 60 * 60 * 24));
+}
+
+/* ---------------------------------------------------------------
    Find & Replace — flat search across all blocks' text.
 --------------------------------------------------------------- */
 function escapeRegExp(str) {
@@ -1039,6 +1147,8 @@ export default function ScreenplayEditor() {
   const [elements, setElements] = useState([]);
   const [stepOutline, setStepOutline] = useState([]);
   const [characterBible, setCharacterBible] = useState([]);
+  const [sceneNotes, setSceneNotes] = useState({});
+  const [showSceneNoteFor, setShowSceneNoteFor] = useState(null);
   const [availableVoices, setAvailableVoices] = useState([]);
   const [isReading, setIsReading] = useState(false);
   const [readingBlockId, setReadingBlockId] = useState(null);
@@ -1058,6 +1168,12 @@ export default function ScreenplayEditor() {
   const [showAppearance, setShowAppearance] = useState(false);
   const [openMenu, setOpenMenu] = useState(null);
   const [showSceneNumbers, setShowSceneNumbers] = useState(false);
+  const [showWeakActionHints, setShowWeakActionHints] = useState(true);
+  const [zenMode, setZenMode] = useState(false);
+  const [dailyGoal, setDailyGoal] = useState(500);
+  const [wordsToday, setWordsToday] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [showGoalPanel, setShowGoalPanel] = useState(false);
   const [viewMode, setViewMode] = useState("script"); // "script" | "corkboard" | "outline"
   const [authed, setAuthed] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
@@ -1089,6 +1205,8 @@ export default function ScreenplayEditor() {
   const readQueueRef = useRef([]);
   const readIndexRef = useRef(0);
   const stoppedRef = useRef(false);
+  const prevWordCountRef = useRef(null);
+  const justSwitchedScriptRef = useRef(true);
   const prevBlocksRef = useRef(null);
   const historyBaseRef = useRef(null);
   const historyTimerRef = useRef(null);
@@ -1163,6 +1281,10 @@ export default function ScreenplayEditor() {
   // being silently overridden.
   useEffect(() => {
     const onKeyDown = (e) => {
+      if (e.key === "Escape" && zenMode) {
+        setZenMode(false);
+        return;
+      }
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
       const key = e.key.toLowerCase();
@@ -1231,6 +1353,7 @@ export default function ScreenplayEditor() {
       if (raw) {
         const prefs = JSON.parse(raw);
         if (typeof prefs.showSceneNumbers === "boolean") setShowSceneNumbers(prefs.showSceneNumbers);
+        if (typeof prefs.showWeakActionHints === "boolean") setShowWeakActionHints(prefs.showWeakActionHints);
       }
     } catch (e) {
       // ignore
@@ -1239,11 +1362,42 @@ export default function ScreenplayEditor() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify({ showSceneNumbers }));
+      localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify({ showSceneNumbers, showWeakActionHints }));
     } catch (e) {
       // ignore
     }
-  }, [showSceneNumbers]);
+  }, [showSceneNumbers, showWeakActionHints]);
+
+  // Load the daily writing-goal tracker, resolving day boundaries and streak.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(GOAL_STORAGE_KEY);
+      const today = new Date().toISOString().slice(0, 10);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (typeof saved.dailyGoal === "number") setDailyGoal(saved.dailyGoal);
+      if (saved.date === today) {
+        setWordsToday(saved.wordsToday || 0);
+        setStreak(saved.streak || 0);
+      } else {
+        const gap = daysBetween(saved.date, today);
+        const metGoal = (saved.wordsToday || 0) >= (saved.dailyGoal || 500);
+        setWordsToday(0);
+        setStreak(gap === 1 && metGoal ? (saved.streak || 0) + 1 : 0);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      localStorage.setItem(GOAL_STORAGE_KEY, JSON.stringify({ dailyGoal, wordsToday, streak, date: today }));
+    } catch (e) {
+      // ignore
+    }
+  }, [dailyGoal, wordsToday, streak]);
 
   // Check for a remembered password on first mount.
   useEffect(() => {
@@ -1321,6 +1475,7 @@ export default function ScreenplayEditor() {
   const openScriptData = (data, id) => {
     bumpIdCounter([...(data.blocks || []), ...(data.elements || []), ...(data.stepOutline || []), ...(data.characterBible || [])]);
     const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
+    justSwitchedScriptRef.current = true;
     setTitle(data.title || "Untitled Screenplay");
     setAuthor(data.author || "");
     setCredit(data.credit || "Written by");
@@ -1331,6 +1486,7 @@ export default function ScreenplayEditor() {
     setElements(data.elements || []);
     setStepOutline(data.stepOutline || []);
     setCharacterBible(data.characterBible || []);
+    setSceneNotes(data.sceneNotes || {});
     setFocusedId(restoredBlocks[0].id);
     setLastSaved(data.savedAt || null);
     setCurrentScriptId(id);
@@ -1344,7 +1500,7 @@ export default function ScreenplayEditor() {
     if (!loaded || !authed || !appPassword || !currentScriptId) return;
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     const savedAt = new Date().toISOString();
-    saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, savedAt }).then((ok) => {
+    saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, sceneNotes, savedAt }).then((ok) => {
       if (ok) setLastSaved(savedAt);
     });
   };
@@ -1399,6 +1555,7 @@ export default function ScreenplayEditor() {
       }
       bumpIdCounter([...(data.blocks || []), ...(data.elements || []), ...(data.stepOutline || []), ...(data.characterBible || [])]);
       const restoredBlocks = data.blocks && data.blocks.length ? data.blocks : [{ id: newId(), type: "scene_heading", text: "" }];
+      justSwitchedScriptRef.current = true;
       setTitle(data.title || "Untitled Screenplay");
       setAuthor(data.author || "");
       setCredit(data.credit || "Written by");
@@ -1409,6 +1566,7 @@ export default function ScreenplayEditor() {
       setElements(data.elements || []);
       setStepOutline(data.stepOutline || []);
       setCharacterBible(data.characterBible || []);
+      setSceneNotes(data.sceneNotes || {});
       setFocusedId(restoredBlocks[0].id);
       if (data.savedAt) setLastSaved(data.savedAt);
       setLoaded(true);
@@ -1449,20 +1607,20 @@ export default function ScreenplayEditor() {
     autosaveTimer.current = setTimeout(() => {
       const savedAt = new Date().toISOString();
       if (appPassword && currentScriptId) {
-        saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, savedAt }).then((ok) => {
+        saveCloudScript(appPassword, currentScriptId, { title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, sceneNotes, savedAt }).then((ok) => {
           if (ok) {
             setLastSaved(savedAt);
             setScriptList((prev) => prev.map((s) => (s.id === currentScriptId ? { ...s, title, updatedAt: savedAt } : s)));
           }
         });
       } else {
-        saveScriptData({ title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, savedAt }).then((ok) => {
+        saveScriptData({ title, author, credit, basedOn, draftDate, contact, blocks, elements, stepOutline, characterBible, sceneNotes, savedAt }).then((ok) => {
           if (ok) setLastSaved(savedAt);
         });
       }
     }, 800);
     return () => clearTimeout(autosaveTimer.current);
-  }, [blocks, title, author, credit, basedOn, draftDate, contact, elements, stepOutline, characterBible, loaded, authed, appPassword, currentScriptId]);
+  }, [blocks, title, author, credit, basedOn, draftDate, contact, elements, stepOutline, characterBible, sceneNotes, loaded, authed, appPassword, currentScriptId]);
 
   useEffect(() => {
     if (!pendingFocus) return;
@@ -1591,6 +1749,8 @@ export default function ScreenplayEditor() {
 
   const breakdown = useMemo(() => computeBreakdown(scenes), [scenes]);
 
+  const crutchWords = useMemo(() => computeCrutchWords(blocks, knownCharacterNames), [blocks, knownCharacterNames]);
+
   const matches = useMemo(() => findMatches(blocks, findQuery), [blocks, findQuery]);
 
   useEffect(() => {
@@ -1651,6 +1811,24 @@ export default function ScreenplayEditor() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const handleExportCrutchWords = () => {
+    const text = generateCrutchWordsText(crutchWords, title);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const safe = (title.trim() || "screenplay").replace(/[^a-z0-9\-_ ]/gi, "").trim().replace(/\s+/g, "_") || "screenplay";
+    a.href = url;
+    a.download = `${safe}_word_usage.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleUpdateSceneNote = (blockId, text) => {
+    setSceneNotes((prev) => ({ ...prev, [blockId]: text }));
   };
 
   const handleExportOutline = () => {
@@ -1749,6 +1927,13 @@ export default function ScreenplayEditor() {
 
   const handleAddOutlineEntry = () => {
     setStepOutline((prev) => [...prev, { id: newId(), heading: "", body: "" }]);
+  };
+
+  const handleApplyOutlineTemplate = (key) => {
+    const tmpl = OUTLINE_TEMPLATES[key];
+    if (!tmpl) return;
+    if (stepOutline.length > 0 && !window.confirm("This will replace your current outline entries. Continue?")) return;
+    setStepOutline(tmpl.beats.map((heading) => ({ id: newId(), heading, body: "" })));
   };
 
   const handleUpdateOutlineEntry = (id, field, value) => {
@@ -2101,8 +2286,9 @@ export default function ScreenplayEditor() {
     setElements([]);
     setStepOutline([]);
     setCharacterBible([]);
+    setSceneNotes({});
     setPendingFocus({ id, pos: "start" });
-    saveScriptData({ title: "Untitled Screenplay", author: "", credit: "Written by", basedOn: "", draftDate: "", contact: "", blocks: blank, elements: [], stepOutline: [], characterBible: [], savedAt: new Date().toISOString() });
+    saveScriptData({ title: "Untitled Screenplay", author: "", credit: "Written by", basedOn: "", draftDate: "", contact: "", blocks: blank, elements: [], stepOutline: [], characterBible: [], sceneNotes: {}, savedAt: new Date().toISOString() });
   };
 
   const handleSave = () => {
@@ -2159,7 +2345,7 @@ export default function ScreenplayEditor() {
       setBlocks(b);
       setPendingFocus({ id: b[0].id, pos: "start" });
       const savedAt = new Date().toISOString();
-      const payload = { title: newTitle, author: a || "", credit: c || "Written by", basedOn: bo || "", draftDate: dd || "", contact: ct || "", blocks: b, elements, stepOutline, characterBible, savedAt };
+      const payload = { title: newTitle, author: a || "", credit: c || "Written by", basedOn: bo || "", draftDate: dd || "", contact: ct || "", blocks: b, elements, stepOutline, characterBible, sceneNotes, savedAt };
       if (appPassword && currentScriptId) {
         saveCloudScript(appPassword, currentScriptId, payload).then((ok) => {
           if (ok) setLastSaved(savedAt);
@@ -2192,6 +2378,24 @@ export default function ScreenplayEditor() {
   const wordCount = blocks.reduce((sum, b) => sum + (b.text.trim() ? b.text.trim().split(/\s+/).length : 0), 0);
   const pageEstimate = Math.max(1, Math.round(wordCount / 230));
 
+  // Track today's writing progress: count only forward-progress deltas
+  // (typing), not deletions, and never count switching to a different
+  // script's word total as "words written."
+  useEffect(() => {
+    if (justSwitchedScriptRef.current) {
+      justSwitchedScriptRef.current = false;
+      prevWordCountRef.current = wordCount;
+      return;
+    }
+    if (prevWordCountRef.current === null) {
+      prevWordCountRef.current = wordCount;
+      return;
+    }
+    const delta = wordCount - prevWordCountRef.current;
+    prevWordCountRef.current = wordCount;
+    if (delta > 0) setWordsToday((w) => w + delta);
+  }, [wordCount]);
+
   const focusedType = blocks.find((b) => b.id === focusedId)?.type || "action";
 
   const styles = useMemo(() => buildStyles(theme), [theme]);
@@ -2206,6 +2410,7 @@ export default function ScreenplayEditor() {
     const typeStyle = dualMode ? { width: "100%", marginLeft: "0" } : TYPE_STYLE[b.type];
     const sceneNum = !dualMode && b.type === "scene_heading" ? sceneNumberMap[b.id] : null;
     const missingTOD = b.type === "scene_heading" && b.text.trim() && !parseSceneHeadingParts(b.text).timeOfDay;
+    const weakReason = showWeakActionHints && b.type === "action" && b.text.trim() ? detectWeakAction(b.text) : null;
     return (
       <div key={b.id} style={{ position: "relative" }}>
         {showSceneNumbers && sceneNum && (
@@ -2216,6 +2421,9 @@ export default function ScreenplayEditor() {
         )}
         {missingTOD && (
           <span style={styles.todWarning} title="No DAY/NIGHT (or other time cue) specified">⚠ DAY/NIGHT?</span>
+        )}
+        {weakReason && (
+          <span style={styles.weakActionBadge} title={weakReason}>✎ weak</span>
         )}
         <textarea
           ref={(el) => (textRefs.current[b.id] = el)}
@@ -2371,6 +2579,7 @@ export default function ScreenplayEditor() {
       ) : (
       <>
       {/* Header */}
+      {!zenMode && (
       <div style={styles.header} className="no-print">
         <div style={styles.brand}>
           <span style={styles.brandMark}>⟡</span>
@@ -2416,6 +2625,7 @@ export default function ScreenplayEditor() {
           ])}
           {renderMenu("view", "View", [
             { label: "Appearance / Theme…", onClick: () => setShowAppearance(true) },
+            { label: "Writing Goal…", onClick: () => setShowGoalPanel(true) },
             { divider: true },
             { header: "Switch View" },
             { label: "Script View", checkbox: viewMode === "script", onClick: () => setViewMode("script") },
@@ -2425,8 +2635,11 @@ export default function ScreenplayEditor() {
             { divider: true },
             { header: "View Aids" },
             { label: "Scene Numbers", checkbox: showSceneNumbers, onClick: () => setShowSceneNumbers((v) => !v) },
+            { label: "Writing Nudges", checkbox: showWeakActionHints, onClick: () => setShowWeakActionHints((v) => !v) },
             { label: sceneListCollapsed ? "Show Scene List" : "Hide Scene List", checkbox: !sceneListCollapsed, onClick: () => setSceneListCollapsed((v) => !v) },
             { label: railCollapsed ? "Expand Left Panel" : "Collapse Left Panel", onClick: () => setRailCollapsed((v) => !v) },
+            { divider: true },
+            { label: "Zen Mode (Esc to exit)", onClick: () => setZenMode(true) },
             { divider: true },
             { label: isReading ? "Stop Reading" : "Table Read (from top)", onClick: isReading ? handleStopReading : () => handleTableRead(null) },
           ])}
@@ -2435,13 +2648,21 @@ export default function ScreenplayEditor() {
             { label: "Elements", onClick: () => { setReportsTab("elements"); setShowReportsPanel(true); } },
             { label: "Dialogue Statistics", onClick: () => { setReportsTab("dialogue"); setShowReportsPanel(true); } },
             { label: "Breakdown", onClick: () => { setReportsTab("breakdown"); setShowReportsPanel(true); } },
+            { label: "Word Usage", onClick: () => { setReportsTab("usage"); setShowReportsPanel(true); } },
           ])}
           <input ref={fileInputRef} type="file" accept=".fountain,.txt,.fdx" style={{ display: "none" }} onChange={handleFile} />
           <button style={styles.btnPrimary} onClick={handleSave}>Save</button>
         </div>
       </div>
+      )}
 
-      {showFind && (
+      {zenMode && (
+        <button style={styles.zenExitBtn} className="no-print" onClick={() => setZenMode(false)}>
+          ✕ Exit Zen (Esc)
+        </button>
+      )}
+
+      {showFind && !zenMode && (
         <div style={styles.findBar} className="no-print">
           <input
             autoFocus
@@ -2487,7 +2708,7 @@ export default function ScreenplayEditor() {
 
       <div style={styles.body}>
         {/* Left rail */}
-        {viewMode === "script" && (
+        {viewMode === "script" && !zenMode && (
         <div style={{ ...styles.rail, ...(railCollapsed ? styles.railCollapsed : {}) }} className="no-print">
           <button
             style={styles.railToggle}
@@ -2618,12 +2839,20 @@ export default function ScreenplayEditor() {
              actual script content and the corkboard's auto-derived cards. */
           <div style={styles.corkboardWrap} className="no-print">
             <div style={styles.outlineList}>
-              <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+              <div style={{ display: "flex", gap: "8px", marginBottom: "10px", flexWrap: "wrap" }}>
                 <button style={styles.btnPrimary} onClick={handleAddOutlineEntry}>+ Add Scene</button>
                 <button style={styles.btn} onClick={handleExportOutline} disabled={stepOutline.length === 0}>Export Outline</button>
               </div>
+              <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap" }}>
+                <span style={{ ...styles.railLabel, marginBottom: 0, alignSelf: "center" }}>Start from template:</span>
+                {Object.entries(OUTLINE_TEMPLATES).map(([key, tmpl]) => (
+                  <button key={key} style={{ ...styles.btn, fontSize: "11px" }} onClick={() => handleApplyOutlineTemplate(key)}>
+                    {tmpl.name}
+                  </button>
+                ))}
+              </div>
               {stepOutline.length === 0 && (
-                <div style={{ color: mutedColor, fontSize: "13px" }}>No outline entries yet — add your first scene above.</div>
+                <div style={{ color: mutedColor, fontSize: "13px" }}>No outline entries yet — add your first scene above, or start from a template.</div>
               )}
               {stepOutline.map((entry, idx) => (
                 <div
@@ -2763,7 +2992,7 @@ export default function ScreenplayEditor() {
         )}
 
         {/* Right-side scene list */}
-        {viewMode === "script" && (
+        {viewMode === "script" && !zenMode && (
           <div
             style={{
               ...styles.rail,
@@ -2785,22 +3014,36 @@ export default function ScreenplayEditor() {
               .filter((b) => b.type === "scene_heading")
               .map((b) => {
                 const num = sceneNumberMap[b.id];
+                const hasNote = !!(sceneNotes[b.id] && sceneNotes[b.id].trim());
+                if (sceneListCollapsed) {
+                  return (
+                    <button
+                      key={b.id}
+                      onClick={() => setPendingFocus({ id: b.id, pos: "start" })}
+                      title={b.text.trim() || "(untitled scene)"}
+                      style={{ ...styles.railBtn, ...styles.railBtnCollapsed, whiteSpace: "nowrap" }}
+                    >
+                      {num || "•"}
+                    </button>
+                  );
+                }
                 return (
-                  <button
-                    key={b.id}
-                    onClick={() => setPendingFocus({ id: b.id, pos: "start" })}
-                    title={b.text.trim() || "(untitled scene)"}
-                    style={{
-                      ...styles.railBtn,
-                      ...(sceneListCollapsed ? styles.railBtnCollapsed : {}),
-                      textAlign: "left",
-                      whiteSpace: sceneListCollapsed ? "nowrap" : "normal",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {sceneListCollapsed ? num || "•" : `${num ? num + ". " : ""}${b.text.trim() || "(untitled)"}`}
-                  </button>
+                  <div key={b.id} style={styles.sceneListRow}>
+                    <button
+                      onClick={() => setPendingFocus({ id: b.id, pos: "start" })}
+                      title={b.text.trim() || "(untitled scene)"}
+                      style={{ ...styles.railBtn, textAlign: "left", whiteSpace: "normal", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}
+                    >
+                      {`${num ? num + ". " : ""}${b.text.trim() || "(untitled)"}`}
+                    </button>
+                    <button
+                      onClick={() => setShowSceneNoteFor(b.id)}
+                      title={hasNote ? "Edit story note" : "Add story note"}
+                      style={{ ...styles.sceneNoteIcon, ...(hasNote ? styles.sceneNoteIconActive : {}) }}
+                    >
+                      📝
+                    </button>
+                  </div>
                 );
               })}
           </div>
@@ -2808,6 +3051,7 @@ export default function ScreenplayEditor() {
       </div>
 
       {/* Status bar */}
+      {!zenMode && (
       <div style={styles.statusBar} className="no-print">
         {viewMode === "corkboard" ? (
           <span style={styles.statusPill}>Corkboard</span>
@@ -2828,8 +3072,10 @@ export default function ScreenplayEditor() {
             : `${wordCount} words · ~${pageEstimate} page${pageEstimate === 1 ? "" : "s"}`}
           {lastSaved ? ` · Saved ${new Date(lastSaved).toLocaleTimeString()}` : ""}
           {authed ? (appPassword ? " · Cloud sync on" : " · Local only") : ""}
+          {` · ${wordsToday}/${dailyGoal} today${streak > 0 ? ` 🔥${streak}` : ""}`}
         </span>
       </div>
+      )}
 
       {isReading && (
         <div style={styles.readingIndicator} className="no-print">
@@ -2946,6 +3192,12 @@ export default function ScreenplayEditor() {
                 onClick={() => setReportsTab("breakdown")}
               >
                 Breakdown
+              </button>
+              <button
+                style={{ ...styles.tabBtn, ...(reportsTab === "usage" ? styles.tabBtnActive : {}) }}
+                onClick={() => setReportsTab("usage")}
+              >
+                Word Usage
               </button>
             </div>
 
@@ -3073,6 +3325,81 @@ export default function ScreenplayEditor() {
                 ))}
               </>
             )}
+
+            {reportsTab === "usage" && (
+              <>
+                <button style={{ ...styles.btnPrimary, width: "100%", marginBottom: "16px" }} onClick={handleExportCrutchWords} disabled={crutchWords.length === 0}>
+                  Export Report
+                </button>
+                <div style={{ fontSize: "12px", color: mutedColor, marginBottom: "10px" }}>
+                  Words repeated 3+ times in Action/Dialogue (common words and character names excluded).
+                </div>
+                {crutchWords.length === 0 && <div style={{ color: mutedColor, fontSize: "13px" }}>Nothing notably repeated yet.</div>}
+                {crutchWords.map(([word, n]) => (
+                  <div key={word} style={styles.elementRow}>
+                    <span>{word}</span>
+                    <span style={{ color: mutedColor }}>{n}×</span>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Writing Goal panel */}
+      {showGoalPanel && (
+        <>
+          <div style={styles.overlay} className="no-print" onClick={() => setShowGoalPanel(false)} />
+          <div style={styles.panel} className="no-print">
+            <div style={styles.panelHeader}>
+              <span style={styles.brandText}>WRITING GOAL</span>
+              <button style={styles.btn} onClick={() => setShowGoalPanel(false)}>Close</button>
+            </div>
+
+            <div style={styles.fieldLabel}>Daily Word Goal</div>
+            <input
+              type="number"
+              min="0"
+              style={styles.authInput}
+              value={dailyGoal}
+              onChange={(e) => setDailyGoal(Math.max(0, parseInt(e.target.value, 10) || 0))}
+            />
+
+            <div style={{ fontSize: "13px", marginBottom: "6px" }}>
+              {wordsToday} / {dailyGoal} words today
+            </div>
+            <div style={styles.statBarTrack}>
+              <div style={{ ...styles.statBarFill, width: `${dailyGoal > 0 ? Math.min(100, (wordsToday / dailyGoal) * 100) : 0}%` }} />
+            </div>
+
+            <div style={{ marginTop: "18px", fontSize: "13px", color: mutedColor }}>
+              {streak > 0 ? `🔥 ${streak} day streak` : "No active streak yet — hit your goal today to start one."}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Scene Note panel */}
+      {showSceneNoteFor && (
+        <>
+          <div style={styles.overlay} className="no-print" onClick={() => setShowSceneNoteFor(null)} />
+          <div style={styles.panel} className="no-print">
+            <div style={styles.panelHeader}>
+              <span style={styles.brandText}>SCENE NOTE</span>
+              <button style={styles.btn} onClick={() => setShowSceneNoteFor(null)}>Close</button>
+            </div>
+            <div style={{ fontSize: "12.5px", color: mutedColor, marginBottom: "10px" }}>
+              {blocks.find((b) => b.id === showSceneNoteFor)?.text.trim() || "(untitled scene)"}
+            </div>
+            <div style={styles.fieldLabel}>What does the protagonist want here? What's in their way?</div>
+            <textarea
+              autoFocus
+              style={{ ...styles.authInput, minHeight: "140px", resize: "vertical", fontFamily: "inherit" }}
+              value={sceneNotes[showSceneNoteFor] || ""}
+              onChange={(e) => handleUpdateSceneNote(showSceneNoteFor, e.target.value)}
+              placeholder="Private notes — not printed, not part of the script…"
+            />
           </div>
         </>
       )}
@@ -3225,6 +3552,7 @@ const THEMES = [
 const DEFAULT_THEME = THEMES[0];
 const THEME_STORAGE_KEY = "slugline_theme_v1";
 const PREFS_STORAGE_KEY = "slugline_prefs_v1";
+const GOAL_STORAGE_KEY = "slugline_goal_v1";
 
 function buildStyles(t) {
   const mute = mix(t.ink, t.text, 0.55);
@@ -3646,6 +3974,43 @@ function buildStyles(t) {
       background: "rgba(255,255,255,0.85)",
       padding: "0 3px",
       borderRadius: "2px",
+    },
+    weakActionBadge: {
+      position: "absolute",
+      top: "2px",
+      right: "2px",
+      fontSize: "10px",
+      color: "#8a6dc4",
+      fontWeight: 700,
+      cursor: "help",
+      background: "rgba(255,255,255,0.85)",
+      padding: "0 3px",
+      borderRadius: "2px",
+    },
+    sceneListRow: { display: "flex", alignItems: "center", gap: "2px" },
+    sceneNoteIcon: {
+      background: "transparent",
+      border: "none",
+      cursor: "pointer",
+      fontSize: "12px",
+      opacity: 0.35,
+      padding: "4px",
+      flexShrink: 0,
+    },
+    sceneNoteIconActive: { opacity: 1 },
+    zenExitBtn: {
+      position: "fixed",
+      top: "14px",
+      right: "14px",
+      zIndex: 70,
+      background: t.ink,
+      color: t.text,
+      border: `1px solid ${t.gold}`,
+      borderRadius: "20px",
+      padding: "6px 14px",
+      fontSize: "11.5px",
+      cursor: "pointer",
+      boxShadow: "0 6px 20px rgba(0,0,0,0.4)",
     },
     authWrap: {
       flex: 1,
