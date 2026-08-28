@@ -815,6 +815,8 @@ function generateCharacterBibleText(characterBible, title) {
 const OUTLINE_TEMPLATES = {
   saveTheCat: {
     name: "Save the Cat",
+    description: "Blake Snyder's 15-beat system, precise about roughly where each beat lands across a script. Popular for how specific and actionable it is.",
+    examples: ["Legally Blonde", "The Lion King"],
     beats: [
       "Opening Image", "Theme Stated", "Set-Up", "Catalyst", "Debate",
       "Break Into Two", "B Story", "Fun and Games", "Midpoint",
@@ -824,6 +826,8 @@ const OUTLINE_TEMPLATES = {
   },
   threeAct: {
     name: "Three-Act Structure",
+    description: "The classic setup / confrontation / resolution shape under most mainstream film and TV. Flexible and forgiving — a solid default.",
+    examples: ["Star Wars: A New Hope", "Jaws"],
     beats: [
       "Opening Image / Status Quo", "Inciting Incident", "Plot Point 1 (End of Act 1)",
       "Rising Action", "Midpoint", "Plot Point 2 (End of Act 2)",
@@ -832,11 +836,37 @@ const OUTLINE_TEMPLATES = {
   },
   herosJourney: {
     name: "Hero's Journey",
+    description: "Joseph Campbell's monomyth — a hero leaves the ordinary world, is transformed through trials, and returns changed. Best for mythic, transformation-driven stories.",
+    examples: ["Star Wars", "The Lord of the Rings"],
     beats: [
       "Ordinary World", "Call to Adventure", "Refusal of the Call", "Meeting the Mentor",
       "Crossing the Threshold", "Tests, Allies, Enemies", "Approach to the Inmost Cave",
       "Ordeal", "Reward", "The Road Back", "Resurrection", "Return with the Elixir",
     ],
+  },
+  freytag: {
+    name: "Freytag's Pyramid",
+    description: "A five-part dramatic arc from 19th-century analysis of Greek and Shakespearean tragedy — exposition rises to a climax, then falls to resolution.",
+    examples: ["Jaws", "The Shawshank Redemption"],
+    beats: ["Exposition", "Rising Action", "Climax", "Falling Action", "Resolution / Dénouement"],
+  },
+  fichtean: {
+    name: "Fichtean Curve",
+    description: "Skips the setup and drops straight into a string of escalating crises leading to one big climax. Common in thrillers, mysteries, and action.",
+    examples: ["Skyfall", "Mad Max: Fury Road"],
+    beats: ["Crisis 1", "Crisis 2", "Crisis 3", "Climax", "Falling Action", "Resolution"],
+  },
+  storyCircle: {
+    name: "Dan Harmon Story Circle",
+    description: "A simplified 8-step take on the Hero's Journey, developed for TV writing (Community, Rick and Morty). Circular — the character ends up back where they started, but changed.",
+    examples: ["Finding Nemo", "The Matrix"],
+    beats: ["You (comfort zone)", "Need", "Go (cross the threshold)", "Search", "Find", "Take", "Return", "Change"],
+  },
+  sevenPoint: {
+    name: "7-Point Story Structure",
+    description: "Dan Wells' structure, built backward from the ending: figure out your climax and hook first, then the turns and pinch points that connect them.",
+    examples: ["The Matrix", "Harry Potter and the Sorcerer's Stone"],
+    beats: ["Hook", "Plot Turn 1", "Pinch Point 1", "Midpoint", "Pinch Point 2", "Plot Turn 2", "Resolution"],
   },
 };
 
@@ -2843,12 +2873,19 @@ export default function ScreenplayEditor() {
                 <button style={styles.btnPrimary} onClick={handleAddOutlineEntry}>+ Add Scene</button>
                 <button style={styles.btn} onClick={handleExportOutline} disabled={stepOutline.length === 0}>Export Outline</button>
               </div>
-              <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap", alignItems: "flex-start" }}>
                 <span style={{ ...styles.railLabel, marginBottom: 0, alignSelf: "center" }}>Start from template:</span>
                 {Object.entries(OUTLINE_TEMPLATES).map(([key, tmpl]) => (
-                  <button key={key} style={{ ...styles.btn, fontSize: "11px" }} onClick={() => handleApplyOutlineTemplate(key)}>
-                    {tmpl.name}
-                  </button>
+                  <div key={key} style={{ position: "relative" }} className="template-tip-wrap">
+                    <button style={{ ...styles.btn, fontSize: "11px" }} onClick={() => handleApplyOutlineTemplate(key)}>
+                      {tmpl.name}
+                    </button>
+                    <div style={styles.templateTooltip} className="template-tip">
+                      <div style={{ fontWeight: 700, marginBottom: "5px" }}>{tmpl.name}</div>
+                      <div style={{ marginBottom: "7px" }}>{tmpl.description}</div>
+                      <div style={{ color: mutedColor, fontSize: "10.5px" }}>e.g. {tmpl.examples.join(", ")}</div>
+                    </div>
+                  </div>
                 ))}
               </div>
               {stepOutline.length === 0 && (
@@ -4012,6 +4049,23 @@ function buildStyles(t) {
       cursor: "pointer",
       boxShadow: "0 6px 20px rgba(0,0,0,0.4)",
     },
+    templateTooltip: {
+      display: "none",
+      position: "absolute",
+      top: "100%",
+      left: 0,
+      marginTop: "6px",
+      width: "220px",
+      background: t.ink,
+      border: `1px solid ${t.gold}`,
+      borderRadius: "5px",
+      padding: "10px",
+      fontSize: "11.5px",
+      color: t.text,
+      zIndex: 80,
+      boxShadow: "0 6px 20px rgba(0,0,0,0.4)",
+      lineHeight: 1.4,
+    },
     authWrap: {
       flex: 1,
       display: "flex",
@@ -4107,6 +4161,7 @@ function buildGlobalCss(t) {
   ::-webkit-scrollbar-thumb { background: ${line}; border-radius: 5px; }
   input[type="color"] { width: 36px; height: 26px; border: none; border-radius: 4px; padding: 0; background: transparent; cursor: pointer; }
   .script-row:hover { background: ${mix(t.ink, t.text, 0.11)} !important; border-color: ${t.gold} !important; }
+  .template-tip-wrap:hover .template-tip { display: block !important; }
   @media print {
     .no-print { display: none !important; }
     body, html { background: white !important; }
