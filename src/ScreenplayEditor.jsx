@@ -753,6 +753,51 @@ function computeBreakdown(scenes) {
   };
 }
 
+/* ---------------------------------------------------------------
+   Chekhov's Gun check — props tagged once via the Elements tracker
+   whose name never turns up again anywhere else in Action/Dialogue.
+--------------------------------------------------------------- */
+function computeChekhovsGuns(elements, blocks) {
+  const props = elements.filter((e) => e.category === "prop");
+  const seen = new Map();
+  props.forEach((p) => {
+    const key = p.text.trim().toLowerCase();
+    if (key && !seen.has(key)) seen.set(key, p.text.trim());
+  });
+  const flags = [];
+  seen.forEach((originalText, key) => {
+    const re = new RegExp(escapeRegExp(key), "i");
+    let mentionCount = 0;
+    blocks.forEach((b) => {
+      if ((b.type === "action" || b.type === "dialogue") && re.test(b.text)) mentionCount++;
+    });
+    if (mentionCount <= 1) flags.push(originalText);
+  });
+  return flags;
+}
+
+/* ---------------------------------------------------------------
+   Pacing — Action-vs-Dialogue word balance per scene, to help spot
+   long monotone stretches of one or the other.
+--------------------------------------------------------------- */
+function computeScenePacing(blocks) {
+  const scenes = [];
+  let current = null;
+  blocks.forEach((b) => {
+    if (b.type === "scene_heading") {
+      if (current) scenes.push(current);
+      current = { heading: b.text.trim() || "(untitled scene)", actionWords: 0, dialogueWords: 0 };
+    } else {
+      if (!current) current = { heading: "(before first scene)", actionWords: 0, dialogueWords: 0 };
+      const words = b.text.trim() ? b.text.trim().split(/\s+/).length : 0;
+      if (b.type === "action") current.actionWords += words;
+      else if (b.type === "dialogue") current.dialogueWords += words;
+    }
+  });
+  if (current) scenes.push(current);
+  return scenes;
+}
+
 function generateBreakdownText(breakdown, title) {
   const out = [];
   out.push(`# Script Breakdown${title.trim() ? " — " + title.trim() : ""}`);
@@ -776,12 +821,15 @@ function generateBreakdownText(breakdown, title) {
    separate from both the script content and the corkboard's
    auto-derived cards.
 --------------------------------------------------------------- */
+const CONNECTOR_LABELS = { but: "BUT", therefore: "THEREFORE", andThen: "AND THEN" };
+
 function generateOutlineText(stepOutline, title) {
   const out = [];
   out.push(`# Outline${title.trim() ? " — " + title.trim() : ""}`);
   out.push("");
   stepOutline.forEach((entry, i) => {
-    out.push(`## ${i + 1}. ${entry.heading.trim() || "(untitled)"}`);
+    const connectorLabel = i > 0 && entry.connector ? ` (— ${CONNECTOR_LABELS[entry.connector]})` : "";
+    out.push(`## ${i + 1}. ${entry.heading.trim() || "(untitled)"}${connectorLabel}`);
     if (entry.body.trim()) out.push(entry.body.trim());
     out.push("");
   });
@@ -1204,6 +1252,7 @@ export default function ScreenplayEditor() {
   const [wordsToday, setWordsToday] = useState(0);
   const [streak, setStreak] = useState(0);
   const [showGoalPanel, setShowGoalPanel] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const [viewMode, setViewMode] = useState("script"); // "script" | "corkboard" | "outline"
   const [authed, setAuthed] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
@@ -1303,16 +1352,39 @@ export default function ScreenplayEditor() {
     setBlocks(last);
   };
 
+  const handleJumpScene = (direction) => {
+    const sceneBlocks = blocks.filter((b) => b.type === "scene_heading");
+    if (sceneBlocks.length === 0) return;
+    const focusedIdx = blocks.findIndex((b) => b.id === focusedId);
+    let currentSceneOrder = -1;
+    sceneBlocks.forEach((sb) => {
+      const idxInBlocks = blocks.findIndex((b) => b.id === sb.id);
+      if (idxInBlocks <= focusedIdx) currentSceneOrder = sceneBlocks.indexOf(sb);
+    });
+    let targetIdx = direction === "next" ? currentSceneOrder + 1 : currentSceneOrder - 1;
+    targetIdx = Math.max(0, Math.min(sceneBlocks.length - 1, targetIdx));
+    const target = sceneBlocks[targetIdx];
+    if (target) {
+      setViewMode("script");
+      setPendingFocus({ id: target.id, pos: "start" });
+    }
+  };
+
   // Global shortcuts: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl+Y redo,
-  // Ctrl/Cmd+F opens Find & Replace. Undo/redo only take over the script's
-  // own history when focus is on one of the script body fields (or nothing
-  // editable) — if focus is in Title/Author/Find/Title Page/Outline/Bible
-  // fields, the browser's native per-field undo is left alone instead of
-  // being silently overridden.
+  // Ctrl/Cmd+F opens Find & Replace, Alt+Down/Up jumps to next/previous
+  // scene. Undo/redo only take over the script's own history when focus
+  // is on one of the script body fields (or nothing editable) — if focus
+  // is in Title/Author/Find/Title Page/Outline/Bible fields, the browser's
+  // native per-field undo is left alone instead of being silently overridden.
   useEffect(() => {
     const onKeyDown = (e) => {
       if (e.key === "Escape" && zenMode) {
         setZenMode(false);
+        return;
+      }
+      if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+        e.preventDefault();
+        handleJumpScene(e.key === "ArrowDown" ? "next" : "prev");
         return;
       }
       const mod = e.metaKey || e.ctrlKey;
@@ -1781,6 +1853,22 @@ export default function ScreenplayEditor() {
 
   const crutchWords = useMemo(() => computeCrutchWords(blocks, knownCharacterNames), [blocks, knownCharacterNames]);
 
+  const chekhovsGuns = useMemo(() => computeChekhovsGuns(elements, blocks), [elements, blocks]);
+
+  const scenePacing = useMemo(() => computeScenePacing(blocks), [blocks]);
+
+  const connectorCounts = useMemo(() => {
+    const counts = { but: 0, therefore: 0, andThen: 0, unset: 0 };
+    stepOutline.forEach((entry, i) => {
+      if (i === 0) return;
+      if (entry.connector === "but") counts.but++;
+      else if (entry.connector === "therefore") counts.therefore++;
+      else if (entry.connector === "andThen") counts.andThen++;
+      else counts.unset++;
+    });
+    return counts;
+  }, [stepOutline]);
+
   const matches = useMemo(() => findMatches(blocks, findQuery), [blocks, findQuery]);
 
   useEffect(() => {
@@ -1956,14 +2044,14 @@ export default function ScreenplayEditor() {
   };
 
   const handleAddOutlineEntry = () => {
-    setStepOutline((prev) => [...prev, { id: newId(), heading: "", body: "" }]);
+    setStepOutline((prev) => [...prev, { id: newId(), heading: "", body: "", connector: null }]);
   };
 
   const handleApplyOutlineTemplate = (key) => {
     const tmpl = OUTLINE_TEMPLATES[key];
     if (!tmpl) return;
     if (stepOutline.length > 0 && !window.confirm("This will replace your current outline entries. Continue?")) return;
-    setStepOutline(tmpl.beats.map((heading) => ({ id: newId(), heading, body: "" })));
+    setStepOutline(tmpl.beats.map((heading) => ({ id: newId(), heading, body: "", connector: null })));
   };
 
   const handleUpdateOutlineEntry = (id, field, value) => {
@@ -2652,6 +2740,8 @@ export default function ScreenplayEditor() {
             { label: `Redo${redoStack.length ? ` (${redoStack.length})` : ""}`, onClick: handleRedo },
             { divider: true },
             { label: "Find & Replace…", onClick: () => setShowFind(true) },
+            { divider: true },
+            { label: "Keyboard Shortcuts…", onClick: () => setShowShortcuts(true) },
           ])}
           {renderMenu("view", "View", [
             { label: "Appearance / Theme…", onClick: () => setShowAppearance(true) },
@@ -2679,6 +2769,7 @@ export default function ScreenplayEditor() {
             { label: "Dialogue Statistics", onClick: () => { setReportsTab("dialogue"); setShowReportsPanel(true); } },
             { label: "Breakdown", onClick: () => { setReportsTab("breakdown"); setShowReportsPanel(true); } },
             { label: "Word Usage", onClick: () => { setReportsTab("usage"); setShowReportsPanel(true); } },
+            { label: "Pacing", onClick: () => { setReportsTab("pacing"); setShowReportsPanel(true); } },
           ])}
           <input ref={fileInputRef} type="file" accept=".fountain,.txt,.fdx" style={{ display: "none" }} onChange={handleFile} />
           <button style={styles.btnPrimary} onClick={handleSave}>Save</button>
@@ -2891,33 +2982,57 @@ export default function ScreenplayEditor() {
               {stepOutline.length === 0 && (
                 <div style={{ color: mutedColor, fontSize: "13px" }}>No outline entries yet — add your first scene above, or start from a template.</div>
               )}
-              {stepOutline.map((entry, idx) => (
-                <div
-                  key={entry.id}
-                  style={styles.outlineEntry}
-                  draggable
-                  onDragStart={(e) => handleOutlineDragStart(e, idx)}
-                  onDragOver={handleOutlineDragOver}
-                  onDrop={(e) => handleOutlineDrop(e, idx)}
-                >
-                  <div style={styles.outlineEntryHeader}>
-                    <span style={styles.outlineEntryNum}>{idx + 1}</span>
-                    <input
-                      style={styles.outlineHeadingInput}
-                      value={entry.heading}
-                      placeholder="Scene title / slug"
-                      onChange={(e) => handleUpdateOutlineEntry(entry.id, "heading", e.target.value)}
-                    />
-                    <button style={styles.elementRemove} onClick={() => handleDeleteOutlineEntry(entry.id)} title="Delete">×</button>
-                  </div>
-                  <textarea
-                    style={styles.outlineBodyInput}
-                    value={entry.body}
-                    placeholder="What happens in this scene…"
-                    onChange={(e) => handleUpdateOutlineEntry(entry.id, "body", e.target.value)}
-                    rows={3}
-                  />
+              {stepOutline.length > 1 && (
+                <div style={{ fontSize: "11.5px", color: mutedColor, marginBottom: "12px" }}>
+                  {connectorCounts.but + connectorCounts.therefore} But/Therefore
+                  {connectorCounts.andThen > 0 && <span style={{ color: "#c9812f" }}> · {connectorCounts.andThen} And Then</span>}
+                  {connectorCounts.unset > 0 && ` · ${connectorCounts.unset} untagged`}
                 </div>
+              )}
+              {stepOutline.map((entry, idx) => (
+                <React.Fragment key={entry.id}>
+                  {idx > 0 && (
+                    <div style={styles.connectorRow}>
+                      {["but", "therefore", "andThen"].map((c) => (
+                        <button
+                          key={c}
+                          onClick={() => handleUpdateOutlineEntry(entry.id, "connector", entry.connector === c ? null : c)}
+                          style={{
+                            ...styles.connectorBtn,
+                            ...(entry.connector === c ? (c === "andThen" ? styles.connectorBtnWeak : styles.connectorBtnActive) : {}),
+                          }}
+                        >
+                          {c === "but" ? "BUT" : c === "therefore" ? "THEREFORE" : "AND THEN"}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div
+                    style={styles.outlineEntry}
+                    draggable
+                    onDragStart={(e) => handleOutlineDragStart(e, idx)}
+                    onDragOver={handleOutlineDragOver}
+                    onDrop={(e) => handleOutlineDrop(e, idx)}
+                  >
+                    <div style={styles.outlineEntryHeader}>
+                      <span style={styles.outlineEntryNum}>{idx + 1}</span>
+                      <input
+                        style={styles.outlineHeadingInput}
+                        value={entry.heading}
+                        placeholder="Scene title / slug"
+                        onChange={(e) => handleUpdateOutlineEntry(entry.id, "heading", e.target.value)}
+                      />
+                      <button style={styles.elementRemove} onClick={() => handleDeleteOutlineEntry(entry.id)} title="Delete">×</button>
+                    </div>
+                    <textarea
+                      style={styles.outlineBodyInput}
+                      value={entry.body}
+                      placeholder="What happens in this scene…"
+                      onChange={(e) => handleUpdateOutlineEntry(entry.id, "body", e.target.value)}
+                      rows={3}
+                    />
+                  </div>
+                </React.Fragment>
               ))}
             </div>
           </div>
@@ -3236,6 +3351,12 @@ export default function ScreenplayEditor() {
               >
                 Word Usage
               </button>
+              <button
+                style={{ ...styles.tabBtn, ...(reportsTab === "pacing" ? styles.tabBtnActive : {}) }}
+                onClick={() => setReportsTab("pacing")}
+              >
+                Pacing
+              </button>
             </div>
 
             {reportsTab === "scenes" && (
@@ -3297,6 +3418,17 @@ export default function ScreenplayEditor() {
                     </div>
                   );
                 })}
+                {chekhovsGuns.length > 0 && (
+                  <div style={{ marginTop: "6px" }}>
+                    <div style={styles.railLabel}>⚠ Possibly Unused (Chekhov's Gun)</div>
+                    <div style={{ fontSize: "11px", color: mutedColor, marginBottom: "6px" }}>
+                      Tagged as a prop once, but the name doesn't turn up again anywhere else in the script.
+                    </div>
+                    {chekhovsGuns.map((name) => (
+                      <div key={name} style={styles.warningRow}>{name}</div>
+                    ))}
+                  </div>
+                )}
               </>
             )}
 
@@ -3380,6 +3512,36 @@ export default function ScreenplayEditor() {
                 ))}
               </>
             )}
+
+            {reportsTab === "pacing" && (
+              <>
+                <div style={{ display: "flex", gap: "14px", marginBottom: "16px", fontSize: "11px", color: mutedColor }}>
+                  <span><span style={{ ...styles.legendSwatch, background: mutedColor }} /> Action</span>
+                  <span><span style={{ ...styles.legendSwatch, background: theme.gold }} /> Dialogue</span>
+                </div>
+                {scenePacing.length === 0 && <div style={{ color: mutedColor, fontSize: "13px" }}>No scenes yet.</div>}
+                {scenePacing.map((s, i) => {
+                  const total = s.actionWords + s.dialogueWords;
+                  const actionPct = total > 0 ? (s.actionWords / total) * 100 : 0;
+                  const dialoguePct = total > 0 ? (s.dialogueWords / total) * 100 : 0;
+                  return (
+                    <div key={i} style={{ marginBottom: "10px" }}>
+                      <div style={{ fontSize: "11.5px", marginBottom: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {i + 1}. {s.heading}
+                      </div>
+                      <div style={{ ...styles.statBarTrack, display: "flex" }}>
+                        {total > 0 ? (
+                          <>
+                            <div style={{ width: `${actionPct}%`, height: "100%", background: mutedColor }} />
+                            <div style={{ width: `${dialoguePct}%`, height: "100%", background: theme.gold }} />
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
           </div>
         </>
       )}
@@ -3413,6 +3575,37 @@ export default function ScreenplayEditor() {
             <div style={{ marginTop: "18px", fontSize: "13px", color: mutedColor }}>
               {streak > 0 ? `🔥 ${streak} day streak` : "No active streak yet — hit your goal today to start one."}
             </div>
+          </div>
+        </>
+      )}
+
+      {/* Keyboard Shortcuts panel */}
+      {showShortcuts && (
+        <>
+          <div style={styles.overlay} className="no-print" onClick={() => setShowShortcuts(false)} />
+          <div style={styles.panel} className="no-print">
+            <div style={styles.panelHeader}>
+              <span style={styles.brandText}>SHORTCUTS</span>
+              <button style={styles.btn} onClick={() => setShowShortcuts(false)}>Close</button>
+            </div>
+            {[
+              { section: "Formatting", items: [["Tab", "Cycle format forward"], ["Shift+Tab", "Cycle format back"], ["Enter", "New element"], ["Shift+Enter", "Line break in element"]] },
+              { section: "Navigation", items: [["Alt+↓", "Next scene"], ["Alt+↑", "Previous scene"], ["↑ / ↓ at field edge", "Move between elements"]] },
+              { section: "Editing", items: [["Ctrl/Cmd+Z", "Undo"], ["Ctrl/Cmd+Shift+Z or Ctrl+Y", "Redo"], ["Ctrl/Cmd+F", "Find & Replace"]] },
+              { section: "Autocomplete", items: [["↑ / ↓", "Highlight a suggestion"], ["Enter or Tab", "Accept highlighted suggestion"]] },
+              { section: "Right-click on selected text", items: [["🔊 Read Aloud", "Speak the selection"], ["▶ Table Read From Here", "Read the rest of the script aloud"], ["📖 Word Association", "Synonyms/antonyms/rhymes via Datamuse"], ["Mark as…", "Tag as character/prop/sound (Action only)"]] },
+              { section: "Other", items: [["Escape", "Close Find bar / exit Zen mode"]] },
+            ].map((group) => (
+              <div key={group.section} style={{ marginBottom: "16px" }}>
+                <div style={styles.railLabel}>{group.section}</div>
+                {group.items.map(([key, desc]) => (
+                  <div key={key} style={styles.shortcutRow}>
+                    <span style={styles.shortcutKey}>{key}</span>
+                    <span style={{ color: mutedColor }}>{desc}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
         </>
       )}
@@ -3972,6 +4165,43 @@ function buildStyles(t) {
       outline: "none",
       resize: "vertical",
       fontFamily: "inherit",
+    },
+    connectorRow: { display: "flex", gap: "6px", marginBottom: "6px", marginLeft: "4px" },
+    connectorBtn: {
+      background: "transparent",
+      border: `1px solid ${line}`,
+      color: mute,
+      borderRadius: "10px",
+      padding: "3px 10px",
+      fontSize: "10px",
+      fontWeight: 700,
+      letterSpacing: "0.5px",
+      cursor: "pointer",
+    },
+    connectorBtnActive: { background: t.gold, color: t.ink, border: `1px solid ${t.gold}` },
+    connectorBtnWeak: { background: "#c9812f", color: "#fff", border: "1px solid #c9812f" },
+    legendSwatch: {
+      display: "inline-block",
+      width: "9px",
+      height: "9px",
+      borderRadius: "2px",
+      marginRight: "5px",
+      verticalAlign: "middle",
+    },
+    shortcutRow: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "5px 0",
+      fontSize: "12px",
+      borderBottom: `1px solid ${line}`,
+      gap: "10px",
+    },
+    shortcutKey: {
+      fontFamily: "'Courier Prime', 'Courier New', Courier, monospace",
+      fontSize: "11px",
+      color: t.gold,
+      flexShrink: 0,
     },
     readingIndicator: {
       position: "fixed",
