@@ -3779,7 +3779,7 @@ const THEMES = [
   { id: "lavender", name: "Lavender", ink: "#f5f0fa", paper: "#ffffff", text: "#2e2438", gold: "#8b6dc4" },
 ];
 
-const DEFAULT_THEME = THEMES[0];
+const DEFAULT_THEME = THEMES.find((t) => t.id === "paperwhite") || THEMES[0];
 const THEME_STORAGE_KEY = "slugline_theme_v1";
 const PREFS_STORAGE_KEY = "slugline_prefs_v1";
 const GOAL_STORAGE_KEY = "slugline_goal_v1";
